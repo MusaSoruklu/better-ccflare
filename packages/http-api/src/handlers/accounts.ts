@@ -32,6 +32,7 @@ import {
 } from "@better-ccflare/providers";
 import { clearAccountRefreshCache } from "@better-ccflare/proxy";
 import type { FullUsageData } from "@better-ccflare/types";
+import { decryptAccountCredentialRow } from "@better-ccflare/database";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
@@ -154,6 +155,9 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			cross_region_mode: string | null;
+			quarantined: 0 | 1;
+			quarantined_at: number | null;
+			quarantine_reason: string | null;
 		}>(
 			`
 				SELECT
@@ -180,6 +184,9 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					custom_endpoint,
 					model_mappings,
 					cross_region_mode,
+					COALESCE(quarantined, 0) as quarantined,
+					quarantined_at,
+					quarantine_reason,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -198,10 +205,13 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 			`,
 			[now, now, now, sessionDuration],
 		);
+		const hydratedAccounts = accounts.map((account) =>
+			decryptAccountCredentialRow(account),
+		);
 
 		// Fetch usage data for all Claude CLI OAuth accounts (those with refresh tokens)
 		// API key accounts don't have usage tracking available
-		const oauthAccounts = accounts.filter(
+		const oauthAccounts = hydratedAccounts.filter(
 			(acc) =>
 				acc.provider === "anthropic" &&
 				acc.access_token &&
@@ -243,7 +253,7 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 		);
 
 		const response: AccountResponse[] = await Promise.all(
-			accounts.map(async (account) => {
+			hydratedAccounts.map(async (account) => {
 				let rateLimitStatus = "OK";
 
 				// Use unified rate limit status if available
@@ -455,6 +465,11 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					usageData: fullUsageData, // Full usage data for UI
 					hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
 					crossRegionMode: account.cross_region_mode,
+					quarantined: account.quarantined === 1,
+					quarantinedAt: account.quarantined_at
+						? new Date(Number(account.quarantined_at)).toISOString()
+						: null,
+					quarantineReason: account.quarantine_reason ?? null,
 				};
 			}),
 		);
@@ -745,6 +760,75 @@ export function createAccountResumeHandler(dbOps: DatabaseOperations) {
 		} catch (error) {
 			return errorResponse(
 				error instanceof Error ? error : new Error("Failed to resume account"),
+			);
+		}
+	};
+}
+
+export function createAccountQuarantineHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			let reason: string | null = null;
+			try {
+				const body = await req.json();
+				if (typeof body.reason === "string" && body.reason.trim()) {
+					reason = body.reason.trim().slice(0, 500);
+				}
+			} catch {
+				// allow empty body for simple quarantine actions
+			}
+
+			await dbOps.quarantineAccount(accountId, reason);
+			await dbOps.pauseAccount(accountId);
+			clearAccountRefreshCache(accountId);
+
+			return jsonResponse({
+				success: true,
+				message: `Account '${account.name}' quarantined`,
+				quarantineReason: reason,
+			});
+		} catch (error) {
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to quarantine account"),
+			);
+		}
+	};
+}
+
+export function createAccountUnquarantineHandler(dbOps: DatabaseOperations) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string }>(
+				"SELECT name FROM accounts WHERE id = ?",
+				[accountId],
+			);
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			await dbOps.unquarantineAccount(accountId);
+
+			return jsonResponse({
+				success: true,
+				message: `Account '${account.name}' removed from quarantine`,
+			});
+		} catch (error) {
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to unquarantine account"),
 			);
 		}
 	};
@@ -2054,8 +2138,11 @@ export function createAccountForceResetRateLimitHandler(
 			}>("SELECT id, name, provider, access_token FROM accounts WHERE id = ?", [
 				accountId,
 			]);
+			const hydratedAccount = account
+				? decryptAccountCredentialRow(account)
+				: null;
 
-			if (!account) {
+			if (!hydratedAccount) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
@@ -2063,7 +2150,7 @@ export function createAccountForceResetRateLimitHandler(
 			if (!resetSuccess) {
 				return errorResponse(
 					new Error(
-						`Failed to reset rate limit state for account '${account.name}'`,
+						`Failed to reset rate limit state for account '${hydratedAccount.name}'`,
 					),
 				);
 			}
@@ -2079,23 +2166,25 @@ export function createAccountForceResetRateLimitHandler(
 			// no active polling exists and the token is likely fresh from recent proxy requests.
 			if (
 				!usagePollTriggered &&
-				account.provider === "anthropic" &&
-				account.access_token
+				hydratedAccount.provider === "anthropic" &&
+				hydratedAccount.access_token
 			) {
-				const { data: usageData } = await fetchUsageData(account.access_token);
+				const { data: usageData } = await fetchUsageData(
+					hydratedAccount.access_token,
+				);
 				if (usageData) {
-					usageCache.set(account.id, usageData);
+					usageCache.set(hydratedAccount.id, usageData);
 					usagePollTriggered = true;
 				}
 			}
 
 			log.info(
-				`Force-reset rate limit for account '${account.name}' (usage poll triggered: ${usagePollTriggered})`,
+				`Force-reset rate limit for account '${hydratedAccount.name}' (usage poll triggered: ${usagePollTriggered})`,
 			);
 
 			return jsonResponse({
 				success: true,
-				message: `Rate limit state cleared for account '${account.name}'`,
+				message: `Rate limit state cleared for account '${hydratedAccount.name}'`,
 				usagePollTriggered,
 			});
 		} catch (error) {

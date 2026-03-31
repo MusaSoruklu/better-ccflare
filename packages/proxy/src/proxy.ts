@@ -11,7 +11,6 @@ import {
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
 	prepareRequestBody,
-	proxyUnauthenticated,
 	proxyWithAccount,
 	selectAccountsForRequest,
 	TIMING,
@@ -152,7 +151,7 @@ export function terminateUsageWorker(): void {
  * 3. Preparing the request body for reuse
  * 4. Selecting accounts based on load balancing strategy
  * 5. Attempting to proxy with each account in order
- * 6. Falling back to unauthenticated proxy if no accounts available
+ * 6. Failing closed with service unavailable if no accounts are available
  *
  * @param req - The incoming request
  * @param url - The parsed URL
@@ -162,7 +161,6 @@ export function terminateUsageWorker(): void {
  * @returns Promise resolving to the proxied response
  * @throws {ValidationError} If the provider cannot handle the path
  * @throws {ServiceUnavailableError} If all accounts fail to proxy the request
- * @throws {ProviderError} If unauthenticated proxy fails
  */
 export async function handleProxy(
 	req: Request,
@@ -253,15 +251,14 @@ export async function handleProxy(
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
-		return proxyUnauthenticated(
-			req,
-			url,
-			requestMeta,
-			finalBodyBuffer,
-			finalCreateBodyStream,
-			ctx,
-			apiKeyId,
-			apiKeyName,
+		log.warn(ERROR_MESSAGES.NO_ACCOUNTS, {
+			path: url.pathname,
+			method: req.method,
+			requestId: requestMeta.id,
+		});
+		throw new ServiceUnavailableError(
+			`${ERROR_MESSAGES.NO_ACCOUNTS}. Add or restore healthy Claude accounts before retrying.`,
+			ctx.provider.name,
 		);
 	}
 

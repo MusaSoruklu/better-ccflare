@@ -105,6 +105,9 @@ export interface AccountRow {
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	cross_region_mode?: string | null; // Bedrock cross-region inference mode
+	quarantined?: boolean | number | null;
+	quarantined_at?: number | null;
+	quarantine_reason?: string | null;
 }
 
 // Domain model - used throughout the application
@@ -133,6 +136,9 @@ export interface Account {
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	cross_region_mode: string | null; // Bedrock cross-region inference mode
+	quarantined?: boolean;
+	quarantined_at?: number | null;
+	quarantine_reason?: string | null;
 }
 
 // API response type - what clients receive
@@ -162,6 +168,9 @@ export interface AccountResponse {
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
 	hasRefreshToken: boolean; // Indicates if the account has a refresh token (OAuth account)
 	crossRegionMode?: string | null; // Cross-region inference mode for Bedrock accounts
+	quarantined?: boolean;
+	quarantinedAt?: string | null;
+	quarantineReason?: string | null;
 }
 
 // UI display type - used in CLI and web dashboard
@@ -184,6 +193,7 @@ export interface AccountDisplay {
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
+	quarantined?: boolean;
 }
 
 // CLI list item type
@@ -218,6 +228,9 @@ export interface AccountListItem {
 	autoRefreshEnabled: boolean;
 	customEndpoint?: string | null;
 	crossRegionMode?: string | null; // Bedrock cross-region inference mode
+	quarantined?: boolean;
+	quarantinedAt?: Date | null;
+	quarantineReason?: string | null;
 }
 
 // Account creation types
@@ -276,6 +289,10 @@ export function toAccount(row: AccountRow): Account {
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
 		cross_region_mode: row.cross_region_mode || null,
+		quarantined: !!row.quarantined,
+		quarantined_at: toNumOrNull(row.quarantined_at),
+		quarantine_reason:
+			typeof row.quarantine_reason === "string" ? row.quarantine_reason : null,
 	};
 }
 
@@ -349,6 +366,11 @@ export function toAccountResponse(account: Account): AccountResponse {
 		usageWindow: null, // Will be filled in by API handler from cache
 		usageData: null, // Will be filled in by API handler from cache
 		hasRefreshToken: !!account.refresh_token, // OAuth accounts have refresh tokens
+		quarantined: account.quarantined,
+		quarantinedAt: account.quarantined_at
+			? new Date(account.quarantined_at).toISOString()
+			: null,
+		quarantineReason: account.quarantine_reason,
 	};
 }
 
@@ -384,5 +406,6 @@ export function toAccountDisplay(account: Account): AccountDisplay {
 		priority: account.priority,
 		autoFallbackEnabled: account.auto_fallback_enabled,
 		autoRefreshEnabled: account.auto_refresh_enabled,
+		quarantined: account.quarantined,
 	};
 }

@@ -3,6 +3,10 @@ import {
 	type AccountRow,
 	toAccount,
 } from "@better-ccflare/types";
+import {
+	decryptAccountCredentialRow,
+	encryptCredentialValue,
+} from "../credential-crypto";
 import { BaseRepository } from "./base.repository";
 
 export class AccountRepository extends BaseRepository<Account> {
@@ -18,11 +22,14 @@ export class AccountRepository extends BaseRepository<Account> {
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 				COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 				custom_endpoint,
-				model_mappings
+				model_mappings,
+				COALESCE(quarantined, 0) as quarantined,
+				quarantined_at,
+				quarantine_reason
 			FROM accounts
 			ORDER BY priority DESC
 		`);
-		return rows.map(toAccount);
+		return rows.map((row) => toAccount(decryptAccountCredentialRow(row)));
 	}
 
 	async findById(accountId: string): Promise<Account | null> {
@@ -38,14 +45,17 @@ export class AccountRepository extends BaseRepository<Account> {
 				COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 				COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 				custom_endpoint,
-				model_mappings
+				model_mappings,
+				COALESCE(quarantined, 0) as quarantined,
+				quarantined_at,
+				quarantine_reason
 			FROM accounts
 			WHERE id = ?
 		`,
 			[accountId],
 		);
 
-		return row ? toAccount(row) : null;
+		return row ? toAccount(decryptAccountCredentialRow(row)) : null;
 	}
 
 	async updateTokens(
@@ -54,15 +64,17 @@ export class AccountRepository extends BaseRepository<Account> {
 		expiresAt: number,
 		refreshToken?: string,
 	): Promise<void> {
+		const encryptedAccessToken = encryptCredentialValue(accessToken);
+		const encryptedRefreshToken = encryptCredentialValue(refreshToken);
 		if (refreshToken) {
 			await this.run(
 				`UPDATE accounts SET access_token = ?, expires_at = ?, refresh_token = ? WHERE id = ?`,
-				[accessToken, expiresAt, refreshToken, accountId],
+				[encryptedAccessToken, expiresAt, encryptedRefreshToken, accountId],
 			);
 		} else {
 			await this.run(
 				`UPDATE accounts SET access_token = ?, expires_at = ? WHERE id = ?`,
-				[accessToken, expiresAt, accountId],
+				[encryptedAccessToken, expiresAt, accountId],
 			);
 		}
 	}
@@ -131,6 +143,20 @@ export class AccountRepository extends BaseRepository<Account> {
 
 	async resume(accountId: string): Promise<void> {
 		await this.run(`UPDATE accounts SET paused = 0 WHERE id = ?`, [accountId]);
+	}
+
+	async quarantine(accountId: string, reason: string | null): Promise<void> {
+		await this.run(
+			`UPDATE accounts SET quarantined = 1, quarantined_at = ?, quarantine_reason = ? WHERE id = ?`,
+			[Date.now(), reason, accountId],
+		);
+	}
+
+	async unquarantine(accountId: string): Promise<void> {
+		await this.run(
+			`UPDATE accounts SET quarantined = 0, quarantined_at = NULL, quarantine_reason = NULL WHERE id = ?`,
+			[accountId],
+		);
 	}
 
 	async resetSession(accountId: string, timestamp: number): Promise<void> {

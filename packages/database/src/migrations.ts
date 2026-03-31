@@ -21,7 +21,10 @@ export function ensureSchema(db: Database): void {
 			last_used INTEGER,
 			request_count INTEGER DEFAULT 0,
 			total_requests INTEGER DEFAULT 0,
-			priority INTEGER DEFAULT 0
+			priority INTEGER DEFAULT 0,
+			quarantined INTEGER DEFAULT 0,
+			quarantined_at INTEGER,
+			quarantine_reason TEXT
 		)
 	`);
 
@@ -361,6 +364,27 @@ export function runMigrations(db: Database, dbPath?: string): void {
 				"ALTER TABLE accounts ADD COLUMN cross_region_mode TEXT DEFAULT 'geographic'",
 			).run();
 			log.info("Added cross_region_mode column to accounts table");
+		}
+
+		if (!initialAccountsColumnNames.includes("quarantined")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN quarantined INTEGER DEFAULT 0",
+			).run();
+			log.info("Added quarantined column to accounts table");
+		}
+
+		if (!initialAccountsColumnNames.includes("quarantined_at")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN quarantined_at INTEGER",
+			).run();
+			log.info("Added quarantined_at column to accounts table");
+		}
+
+		if (!initialAccountsColumnNames.includes("quarantine_reason")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN quarantine_reason TEXT",
+			).run();
+			log.info("Added quarantine_reason column to accounts table");
 		}
 
 		// Make refresh_token nullable (was NOT NULL, causing API-key providers to need workarounds)

@@ -5,6 +5,7 @@ import type { RuntimeConfig } from "@better-ccflare/config";
 import type { Disposable } from "@better-ccflare/core";
 import type { Account, StrategyStore } from "@better-ccflare/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
+import { requireCredentialEncryptionKey } from "./credential-crypto";
 import { ensureSchema, runMigrations } from "./migrations";
 import { ensureSchemaPg, runMigrationsPg } from "./migrations-pg";
 import { resolveDbPath } from "./paths";
@@ -172,6 +173,15 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		fastMode = false,
 	) {
 		this.fastMode = fastMode;
+		const postgresRequired =
+			(process.env.CLAUDE_UPSTREAM_REQUIRE_POSTGRES?.trim().toLowerCase() ||
+				"") === "true";
+		const encryptionRequired =
+			(process.env.CLAUDE_UPSTREAM_REQUIRE_TOKEN_ENCRYPTION?.trim().toLowerCase() ||
+				"") === "true";
+		if (encryptionRequired) {
+			requireCredentialEncryptionKey();
+		}
 
 		// Default database configuration optimized for distributed filesystems
 		this.dbConfig = {
@@ -199,6 +209,11 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 			databaseUrl &&
 			(databaseUrl.startsWith("postgres://") ||
 				databaseUrl.startsWith("postgresql://"));
+		if (postgresRequired && !isPostgres) {
+			throw new Error(
+				"CLAUDE_UPSTREAM_REQUIRE_POSTGRES is enabled but DATABASE_URL is not configured",
+			);
+		}
 
 		if (isPostgres) {
 			this.isSQLite = false;
@@ -413,6 +428,17 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 
 	async resumeAccount(accountId: string): Promise<void> {
 		await this.accounts.resume(accountId);
+	}
+
+	async quarantineAccount(
+		accountId: string,
+		reason: string | null,
+	): Promise<void> {
+		await this.accounts.quarantine(accountId, reason);
+	}
+
+	async unquarantineAccount(accountId: string): Promise<void> {
+		await this.accounts.unquarantine(accountId);
 	}
 
 	async renameAccount(accountId: string, newName: string): Promise<void> {

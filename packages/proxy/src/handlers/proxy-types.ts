@@ -18,11 +18,11 @@ export interface ProxyContext {
 
 /** Error messages used throughout the proxy module */
 export const ERROR_MESSAGES = {
-	NO_ACCOUNTS:
-		"No active accounts available - forwarding request without authentication",
+	NO_ACCOUNTS: "No active accounts available for this Claude upstream",
 	PROVIDER_CANNOT_HANDLE: "Provider cannot handle path",
 	REFRESH_NOT_FOUND: "Refresh promise not found for account",
-	UNAUTHENTICATED_FAILED: "Failed to forward unauthenticated request",
+	UNAUTHENTICATED_FAILED:
+		"Unauthenticated forwarding is disabled for this Claude upstream",
 	ALL_ACCOUNTS_FAILED: "All accounts failed to proxy the request",
 	TOKEN_REFRESH_FAILED: "Failed to refresh access token",
 	PROXY_REQUEST_FAILED: "Failed to proxy request with account",

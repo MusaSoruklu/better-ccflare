@@ -4,6 +4,14 @@ export { DatabaseOperations };
 
 export type { RuntimeConfig } from "@better-ccflare/config";
 export { BunSqlAdapter } from "./adapters/bun-sql-adapter";
+export {
+	decryptAccountCredentialRow,
+	decryptCredentialValue,
+	encryptCredentialValue,
+	isCredentialEncryptionEnabled,
+	isEncryptedCredentialValue,
+	requireCredentialEncryptionKey,
+} from "./credential-crypto";
 // Re-export other utilities
 export { AsyncDbWriter } from "./async-writer";
 export type {

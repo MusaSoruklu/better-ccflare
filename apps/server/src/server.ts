@@ -40,6 +40,12 @@ import {
 import { validatePathOrThrow } from "@better-ccflare/security";
 import type { Account } from "@better-ccflare/types";
 import { serve } from "bun";
+import {
+	authorizePrivateRequest,
+	isDashboardDisabledInProduction,
+	isPrivateAccessEnforced,
+	validatePrivateAccessRuntime,
+} from "./private-access";
 
 // Import embedded dashboard assets (will be bundled in compiled binary)
 let embeddedDashboard: Record<
@@ -158,6 +164,14 @@ function serveDashboardFile(
 			...securityHeaders,
 		},
 	});
+}
+
+function normalizeApiRouterUrl(url: URL, kind: "admin" | "health" | "proxy" | "other"): URL {
+	const normalized = new URL(url.toString());
+	if (kind === "admin" && normalized.pathname.startsWith("/internal/admin/")) {
+		normalized.pathname = `/api/${normalized.pathname.slice("/internal/admin/".length)}`;
+	}
+	return normalized;
 }
 
 // Module-level server instance
@@ -454,6 +468,9 @@ export default async function startServer(options?: {
 		sslKeyPath,
 		sslCertPath,
 	} = options || {};
+	validatePrivateAccessRuntime();
+	const enforcePrivateAccess = isPrivateAccessEnforced();
+	const dashboardEnabled = withDashboard && !isDashboardDisabledInProduction();
 
 	// Enable TLS if both certificate paths are provided
 	tlsEnabled = !!(sslKeyPath && sslCertPath);
@@ -729,17 +746,60 @@ export default async function startServer(options?: {
 						},
 					}
 				: {}),
-			async fetch(req: Request) {
-				const url = new URL(req.url);
+				async fetch(req: Request) {
+					const url = new URL(req.url);
+					const privateRequest = authorizePrivateRequest(req, url.pathname);
+					if (!privateRequest.allowed) {
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: {
+								type: privateRequest.code,
+								message: privateRequest.message,
+							},
+						}),
+						{
+							status: privateRequest.status,
+							headers: { "Content-Type": "application/json" },
+							},
+						);
+					}
 
-				// Try API routes first
-				const apiResponse = await apiRouter.handleRequest(url, req);
-				if (apiResponse) {
-					return apiResponse;
+					if (enforcePrivateAccess && url.pathname === "/health") {
+						return Response.json(
+							{
+								status: "ok",
+								timestamp: new Date().toISOString(),
+							},
+							{
+								headers: { "Cache-Control": CACHE.CACHE_CONTROL_NO_CACHE },
+							},
+						);
+					}
+
+					const routerUrl = normalizeApiRouterUrl(url, privateRequest.kind);
+
+					// Try API routes first
+					const apiResponse = await apiRouter.handleRequest(routerUrl, req);
+					if (apiResponse) {
+						return apiResponse;
+				}
+
+				if (privateRequest.kind === "admin") {
+					return new Response(
+						JSON.stringify({
+							type: "error",
+							error: { type: "not_found", message: "Not found" },
+						}),
+						{
+							status: HTTP_STATUS.NOT_FOUND,
+							headers: { "Content-Type": "application/json" },
+						},
+					);
 				}
 
 				// Dashboard routes (only if enabled and assets are available)
-				if (withDashboard && dashboardManifest) {
+				if (dashboardEnabled && dashboardManifest) {
 					// Serve dashboard static assets
 					if (dashboardManifest[url.pathname]) {
 						return serveDashboardFile(
@@ -762,11 +822,19 @@ export default async function startServer(options?: {
 				// All other paths go to proxy
 				// Authenticate the proxy request with error handling to prevent bypass
 				try {
-					const authResult = await authService.authenticateRequest(
-						req,
-						url.pathname,
-						req.method,
-					);
+						const authResult = enforcePrivateAccess
+							? {
+									isAuthenticated: true as const,
+									apiKey: undefined,
+									apiKeyId: null,
+									apiKeyName: null,
+									role: undefined,
+								}
+							: await authService.authenticateRequest(
+									req,
+								url.pathname,
+								req.method,
+							);
 					if (!authResult.isAuthenticated) {
 						return new Response(
 							JSON.stringify({
@@ -783,8 +851,7 @@ export default async function startServer(options?: {
 						);
 					}
 
-					// Authorization check - verify API key has permission for this endpoint
-					if (authResult.apiKey) {
+					if (!enforcePrivateAccess && authResult.apiKey) {
 						const authzResult = await authService.authorizeEndpoint(
 							authResult.apiKey,
 							url.pathname,
@@ -921,9 +988,9 @@ export default async function startServer(options?: {
 		const protocol = tlsEnabled ? "https" : "http";
 		const displayHost = hostname === "0.0.0.0" ? "localhost" : hostname;
 		const dashboardStatus =
-			withDashboard && dashboardManifest
+			dashboardEnabled && dashboardManifest
 				? `${protocol}://${displayHost}:${serverInstance.port}`
-				: withDashboard && !dashboardManifest
+				: dashboardEnabled && !dashboardManifest
 					? "unavailable (assets not found)"
 					: "disabled";
 		console.log(`
@@ -963,7 +1030,7 @@ Available endpoints:
 	);
 	if (activeAccounts.length === 0) {
 		log.warn(
-			"No active accounts available - requests will be forwarded without authentication",
+			"No active accounts available - proxy requests will fail closed until Claude accounts are added",
 		);
 	}
 

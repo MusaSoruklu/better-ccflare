@@ -1,8 +1,50 @@
 import { Logger } from "@better-ccflare/logger";
+import {
+	getRepresentativeUtilization,
+	getRepresentativeWindow,
+	type UsageData,
+	usageCache,
+} from "@better-ccflare/providers";
 import type { Account, RequestMeta } from "@better-ccflare/types";
 import type { ProxyContext } from "./proxy-types";
 
 const log = new Logger("AccountSelector");
+
+function usageStopPercent(): number {
+	const parsed = Number(
+		process.env.CLAUDE_UPSTREAM_STOP_AT_UTILIZATION_PERCENT?.trim() || "",
+	);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return 90;
+	}
+	return Math.max(1, Math.min(100, Math.round(parsed)));
+}
+
+function accountHasUsageHeadroom(account: Account): boolean {
+	if (account.provider !== "anthropic" && account.provider !== "claude-oauth") {
+		return true;
+	}
+
+	const usageData = usageCache.get(account.id) as UsageData | null;
+	if (!usageData || typeof usageData !== "object") {
+		return true;
+	}
+
+	const utilization = getRepresentativeUtilization(usageData);
+	if (typeof utilization !== "number" || !Number.isFinite(utilization)) {
+		return true;
+	}
+
+	if (utilization < usageStopPercent()) {
+		return true;
+	}
+
+	const window = getRepresentativeWindow(usageData) || "unknown";
+	log.warn(
+		`Skipping account ${account.name} because usage utilization is too high (${utilization}% on ${window})`,
+	);
+	return false;
+}
 
 /**
  * Gets accounts ordered by the load balancing strategy
@@ -17,7 +59,7 @@ export async function getOrderedAccounts(
 	try {
 		const allAccounts = await ctx.dbOps.getAllAccounts();
 		// Return all accounts - the provider will be determined dynamically per account
-		return ctx.strategy.select(allAccounts, meta);
+		return ctx.strategy.select(allAccounts, meta).filter(accountHasUsageHeadroom);
 	} catch (error) {
 		log.error("Failed to get accounts from database:", error);
 		console.error("\n❌ DATABASE ERROR DETECTED");
@@ -28,10 +70,9 @@ export async function getOrderedAccounts(
 		);
 		console.error("To diagnose and repair the database, run:");
 		console.error("  bun run cli --repair-db\n");
-		console.error("The request will fall back to unauthenticated mode.");
+		console.error("The request will be rejected with service unavailable.");
 		console.error(`${"═".repeat(50)}\n`);
-		// Return empty array to gracefully handle database errors
-		// This will cause the proxy to fall back to unauthenticated mode
+		// Return empty array so the caller can fail closed with service unavailable.
 		return [];
 	}
 }
@@ -55,7 +96,7 @@ export async function selectAccountsForRequest(
 				const forcedAccount = allAccounts.find(
 					(acc) => acc.id === forcedAccountId,
 				);
-				if (forcedAccount) {
+				if (forcedAccount && accountHasUsageHeadroom(forcedAccount)) {
 					return [forcedAccount];
 				}
 				// If forced account not found, fall back to normal selection

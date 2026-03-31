@@ -66,7 +66,10 @@ export async function ensureSchemaPg(adapter: BunSqlAdapter): Promise<void> {
 			custom_endpoint TEXT,
 			auto_refresh_enabled INTEGER DEFAULT 0,
 			model_mappings TEXT,
-			cross_region_mode TEXT DEFAULT 'geographic'
+			cross_region_mode TEXT DEFAULT 'geographic',
+			quarantined INTEGER DEFAULT 0,
+			quarantined_at BIGINT,
+			quarantine_reason TEXT
 		)
 	`);
 
@@ -225,6 +228,23 @@ export async function runMigrationsPg(adapter: BunSqlAdapter): Promise<void> {
 			column: "auto_refresh_enabled",
 			definition:
 				"ALTER TABLE accounts ADD COLUMN auto_refresh_enabled INTEGER DEFAULT 0",
+		},
+		{
+			table: "accounts",
+			column: "quarantined",
+			definition:
+				"ALTER TABLE accounts ADD COLUMN quarantined INTEGER DEFAULT 0",
+		},
+		{
+			table: "accounts",
+			column: "quarantined_at",
+			definition: "ALTER TABLE accounts ADD COLUMN quarantined_at BIGINT",
+		},
+		{
+			table: "accounts",
+			column: "quarantine_reason",
+			definition:
+				"ALTER TABLE accounts ADD COLUMN quarantine_reason TEXT",
 		},
 		{
 			table: "requests",

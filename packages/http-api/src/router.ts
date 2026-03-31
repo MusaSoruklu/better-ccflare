@@ -9,10 +9,12 @@ import {
 	createAccountModelMappingsUpdateHandler,
 	createAccountPauseHandler,
 	createAccountPriorityUpdateHandler,
+	createAccountQuarantineHandler,
 	createAccountReloadHandler,
 	createAccountRemoveHandler,
 	createAccountRenameHandler,
 	createAccountResumeHandler,
+	createAccountUnquarantineHandler,
 	createAccountsListHandler,
 	createAlibabaCodingPlanAccountAddHandler,
 	createAnthropicCompatibleAccountAddHandler,
@@ -276,37 +278,65 @@ export class APIRouter {
 		};
 	}
 
+	private normalizeInternalAdminPath(path: string): string {
+		if (path === "/internal/admin/health") {
+			return "/health";
+		}
+		if (!path.startsWith("/internal/admin/")) {
+			return path;
+		}
+		const suffix = path.slice("/internal/admin".length);
+		if (!suffix || suffix === "/") {
+			return "/api";
+		}
+		return `/api${suffix}`;
+	}
+
 	/**
 	 * Handle an incoming request
 	 */
 	async handleRequest(url: URL, req: Request): Promise<Response | null> {
-		const path = url.pathname;
+		const privateAccessEnabled =
+			(process.env.CLAUDE_UPSTREAM_ENFORCE_PRIVATE_ACCESS?.trim().toLowerCase() ||
+				"") === "true";
+		const path = this.normalizeInternalAdminPath(url.pathname);
 		const method = req.method;
 		const key = `${method}:${path}`;
 
-		// Authenticate the request
-		const authResult = await this.authService.authenticateRequest(
-			req,
-			path,
-			method,
-		);
-		if (!authResult.isAuthenticated) {
-			return errorResponse(
-				Unauthorized(authResult.error || "Authentication failed"),
-			);
-		}
+		const skipRouterAuth =
+			privateAccessEnabled &&
+			(url.pathname === "/health" || url.pathname.startsWith("/internal/admin/"));
+		const authResult = skipRouterAuth
+			? {
+					isAuthenticated: true as const,
+					apiKey: undefined,
+					apiKeyId: undefined,
+					apiKeyName: undefined,
+					role: undefined,
+					error: undefined,
+				}
+			: await this.authService.authenticateRequest(req, path, method);
 
-		// Authorize the request based on API key role
-		if (authResult.apiKey) {
-			const authzResult = await this.authService.authorizeEndpoint(
-				authResult.apiKey,
-				path,
-				method,
-			);
-			if (!authzResult.authorized) {
+		if (!skipRouterAuth) {
+			// Authenticate the request
+			if (!authResult.isAuthenticated) {
 				return errorResponse(
-					Unauthorized(authzResult.reason || "Authorization failed"),
+					Unauthorized(authResult.error || "Authentication failed"),
 				);
+			}
+
+			// Authorize the request based on API key role
+			if (authResult.apiKey) {
+				const authzResult = await this.authService.authorizeEndpoint(
+					authResult.apiKey,
+					path,
+					method,
+				);
+				if (!authzResult.authorized) {
+					return errorResponse(
+						Unauthorized(authzResult.reason || "Authorization failed"),
+					);
+				}
 			}
 		}
 
@@ -350,6 +380,24 @@ export class APIRouter {
 					req,
 					url,
 				);
+			}
+
+			if (path.endsWith("/quarantine") && method === "POST") {
+				const quarantineHandler = createAccountQuarantineHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					quarantineHandler(req, accountId),
+				)(req, url);
+			}
+
+			if (path.endsWith("/unquarantine") && method === "POST") {
+				const unquarantineHandler = createAccountUnquarantineHandler(
+					this.context.dbOps,
+				);
+				return await this.wrapHandler((req) =>
+					unquarantineHandler(req, accountId),
+				)(req, url);
 			}
 
 			// Account reload

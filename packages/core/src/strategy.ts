@@ -17,6 +17,7 @@ export function isAccountAvailable(
 ): boolean {
 	return (
 		!account.paused &&
+		!account.quarantined &&
 		(!account.rate_limited_until || account.rate_limited_until < now)
 	);
 }

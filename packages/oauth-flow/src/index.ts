@@ -1,5 +1,8 @@
 import type { Config } from "@better-ccflare/config";
-import type { DatabaseOperations } from "@better-ccflare/database";
+import {
+	encryptCredentialValue,
+	type DatabaseOperations,
+} from "@better-ccflare/database";
 import {
 	generatePKCE,
 	getOAuthProvider,
@@ -236,8 +239,8 @@ export class OAuthFlow {
 				id,
 				name,
 				"anthropic",
-				tokens.refreshToken || "",
-				tokens.accessToken,
+				encryptCredentialValue(tokens.refreshToken || ""),
+				encryptCredentialValue(tokens.accessToken),
 				tokens.expiresAt,
 				Date.now(),
 				priority,
@@ -287,7 +290,7 @@ export class OAuthFlow {
 				id,
 				name,
 				"claude-console-api",
-				apiKey,
+				encryptCredentialValue(apiKey),
 				Date.now(),
 				priority,
 				customEndpoint || null,

@@ -1,0 +1,46 @@
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      file \
+      sqlite3 && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY apps/cli/dist/better-ccflare /usr/local/bin/better-ccflare
+
+RUN chmod +x /usr/local/bin/better-ccflare && \
+    /usr/local/bin/better-ccflare --version && \
+    useradd -r -u 1000 -m -s /bin/bash ccflare && \
+    mkdir -p /app/logs /data && \
+    chown -R ccflare:ccflare /app /data
+
+ENV NODE_ENV=production
+ENV BETTER_CCFLARE_DB_PATH=/data/better-ccflare.db
+ENV BETTER_CCFLARE_LOG_DIR=/app/logs
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+RUN printf '%s\n' \
+    '#!/bin/bash' \
+    'set -euo pipefail' \
+    'echo "================================="' \
+    'echo "The Claw Bay Claude Upstream"' \
+    'echo "================================="' \
+    'echo "Architecture: $(uname -m)"' \
+    '/usr/local/bin/better-ccflare --version' \
+    'exec /usr/local/bin/better-ccflare "$@"' \
+    > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+USER ccflare
+
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["--serve", "--port", "8080"]

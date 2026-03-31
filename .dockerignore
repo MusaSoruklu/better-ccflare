@@ -5,6 +5,8 @@ node_modules
 # Build outputs
 dist
 **/dist
+!apps/cli/dist
+!apps/cli/dist/better-ccflare
 build
 **/build
 
