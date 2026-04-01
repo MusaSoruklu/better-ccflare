@@ -166,7 +166,10 @@ function serveDashboardFile(
 	});
 }
 
-function normalizeApiRouterUrl(url: URL, kind: "admin" | "health" | "proxy" | "other"): URL {
+function normalizeApiRouterUrl(
+	url: URL,
+	kind: "admin" | "health" | "proxy" | "dashboard" | "other",
+): URL {
 	const normalized = new URL(url.toString());
 	if (kind === "admin" && normalized.pathname.startsWith("/internal/admin/")) {
 		normalized.pathname = `/api/${normalized.pathname.slice("/internal/admin/".length)}`;

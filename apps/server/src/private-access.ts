@@ -12,7 +12,7 @@ const ADMIN_ALLOWED_PATHS = [
 ] as const;
 
 type RequestGate =
-	| { allowed: true; kind: "health" | "admin" | "proxy" | "other" }
+	| { allowed: true; kind: "health" | "admin" | "proxy" | "dashboard" | "other" }
 	| { allowed: false; status: number; code: string; message: string };
 
 function readBooleanEnv(raw: string | undefined, fallback = false): boolean {
@@ -32,7 +32,6 @@ export function isPrivateAccessEnforced(): boolean {
 }
 
 export function isDashboardDisabledInProduction(): boolean {
-	if (isPrivateAccessEnforced()) return true;
 	return readBooleanEnv(process.env.CLAUDE_UPSTREAM_DISABLE_DASHBOARD, false);
 }
 
@@ -66,6 +65,12 @@ function safeEquals(a: string, b: string): boolean {
 	return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
+function hasValidAdminToken(req: Request): boolean {
+	const expected = trimmedEnv("CLAUDE_UPSTREAM_ADMIN_TOKEN");
+	const provided = req.headers.get("x-claude-admin-token")?.trim() || "";
+	return safeEquals(provided, expected);
+}
+
 function isAllowedAdminPath(path: string): boolean {
 	if (ADMIN_ALLOWED_PATHS.includes(path as (typeof ADMIN_ALLOWED_PATHS)[number])) {
 		return true;
@@ -77,15 +82,19 @@ function isAllowedAdminPath(path: string): boolean {
 
 	return /(\/pause|\/resume|\/quarantine|\/unquarantine|\/reload|\/force-reset-rate-limit)$/.test(
 		path,
-	);
+	) || reqDeletePath(path);
 }
 
-function classifyPath(path: string): "health" | "admin" | "proxy" | "blocked" | "other" {
+function reqDeletePath(path: string): boolean {
+	return path.startsWith("/internal/admin/accounts/") && !path.includes("/", "/internal/admin/accounts/".length);
+}
+
+function classifyPath(path: string): "health" | "admin" | "proxy" | "dashboard" | "other" {
 	if (path === "/health") return "health";
 	if (path.startsWith(INTERNAL_ADMIN_PREFIX)) return "admin";
 	if (path.startsWith("/v1/") || path.startsWith("/messages/")) return "proxy";
-	if (path.startsWith("/api/")) return "blocked";
-	return "other";
+	if (path.startsWith("/api/")) return "dashboard";
+	return "dashboard";
 }
 
 export function authorizePrivateRequest(req: Request, path: string): RequestGate {
@@ -106,9 +115,7 @@ export function authorizePrivateRequest(req: Request, path: string): RequestGate
 				message: "Not found",
 			};
 		}
-		const expected = trimmedEnv("CLAUDE_UPSTREAM_ADMIN_TOKEN");
-		const provided = req.headers.get("x-claude-admin-token")?.trim() || "";
-		if (!safeEquals(provided, expected)) {
+		if (!hasValidAdminToken(req)) {
 			return {
 				allowed: false,
 				status: 401,
@@ -131,13 +138,16 @@ export function authorizePrivateRequest(req: Request, path: string): RequestGate
 		}
 		return { allowed: true, kind };
 	}
-	if (kind === "blocked") {
-		return {
-			allowed: false,
-			status: 404,
-			code: "not_found",
-			message: "Not found",
-		};
+	if (kind === "dashboard") {
+		if (isDashboardDisabledInProduction() || !hasValidAdminToken(req)) {
+			return {
+				allowed: false,
+				status: 404,
+				code: "not_found",
+				message: "Not found",
+			};
+		}
+		return { allowed: true, kind };
 	}
 	return {
 		allowed: false,

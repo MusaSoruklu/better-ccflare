@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { resolveDashboardApiPath } from "../runtime-config";
 import { cn } from "../lib/utils";
 import { version } from "../lib/version";
 import { CopyButton } from "./CopyButton";
@@ -69,7 +70,7 @@ export function Navigation() {
 		try {
 			// Check if the binary exists in bun's global path
 			try {
-				const response = await fetch("/api/system/package-manager");
+				const response = await fetch(resolveDashboardApiPath("/api/system/package-manager"));
 				if (response.ok) {
 					const data = await response.json();
 					isBinaryInstallation = data.isBinary || false;
@@ -207,7 +208,7 @@ export function Navigation() {
 		setUpdateStatus("checking");
 		try {
 			const [response, packageInfo] = await Promise.all([
-				fetch("/api/version/check"),
+				fetch(resolveDashboardApiPath("/api/version/check")),
 				detectPackageManager(),
 			]);
 

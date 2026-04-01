@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
+import { getDashboardBasename } from "./runtime-config";
 
 const elem =
 	typeof document !== "undefined" ? document.getElementById("root") : null;
@@ -10,7 +11,7 @@ if (!elem) {
 }
 const app = (
 	<StrictMode>
-		<BrowserRouter>
+		<BrowserRouter basename={getDashboardBasename() || undefined}>
 			<App />
 		</BrowserRouter>
 	</StrictMode>

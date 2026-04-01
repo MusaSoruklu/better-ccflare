@@ -15,6 +15,7 @@ import type {
 	StatsWithAccounts,
 } from "@better-ccflare/types";
 import { API_LIMITS, API_TIMEOUT } from "./constants";
+import { resolveDashboardApiPath } from "./runtime-config";
 
 // Re-export types with dashboard-specific aliases for backward compatibility
 export type Account = AccountResponse;
@@ -133,10 +134,11 @@ class API extends HttpClient {
 		url: string,
 		options: RequestOptions = {},
 	): Promise<T> {
+		const resolvedUrl = resolveDashboardApiPath(url);
 		const apiKey = this.getApiKey();
 
 		if (apiKey) {
-			this.logger.debug("Including API key in request to:", url);
+			this.logger.debug("Including API key in request to:", resolvedUrl);
 			// Merge API key into headers
 			const headers = {
 				...((options.headers as Record<string, string>) || {}),
@@ -144,11 +146,11 @@ class API extends HttpClient {
 			};
 			options = { ...options, headers };
 		} else {
-			this.logger.debug("No API key found for request to:", url);
+			this.logger.debug("No API key found for request to:", resolvedUrl);
 		}
 
 		try {
-			return await super.request<T>(url, options);
+			return await super.request<T>(resolvedUrl, options);
 		} catch (error) {
 			// If we get a 401, dispatch a custom event to trigger auth dialog
 			if (error instanceof HttpError && error.status === 401) {
@@ -686,7 +688,7 @@ class API extends HttpClient {
 
 	// SSE streaming requires special handling, keep as-is
 	streamLogs(onLog: (log: LogEntry) => void): EventSource {
-		const eventSource = new EventSource(`/api/logs/stream`);
+		const eventSource = new EventSource(resolveDashboardApiPath("/api/logs/stream"));
 		eventSource.addEventListener("message", (event) => {
 			try {
 				const data = JSON.parse(event.data);

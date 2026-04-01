@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef } from "react";
 import type { Account, RequestPayload, RequestResponse } from "../api";
 import { queryKeys } from "../lib/query-keys";
+import { resolveDashboardApiPath } from "../runtime-config";
 
 // Connection pool management
 const CONNECTION_POOL = new Map<
@@ -228,7 +229,7 @@ export function useRequestStream(limit = 200) {
 			}
 
 			console.log(`Creating new SSE connection: ${connectionKey}`);
-			const es = new EventSource("/api/requests/stream");
+			const es = new EventSource(resolveDashboardApiPath("/api/requests/stream"));
 
 			// Setup event handlers
 			es.addEventListener("open", () => {
