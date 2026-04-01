@@ -21,16 +21,16 @@ describe("AnthropicProvider", () => {
 			expect(prepared.get("anthropic-beta")).toBe("oauth-2025-04-20");
 		});
 
-		it("keeps known Claude Code betas and strips unsupported ones", () => {
+		it("keeps requested Claude Code betas except known blocked ones", () => {
 			const headers = new Headers({
 				"anthropic-beta":
-					"claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,custom-beta,oauth-2025-04-20",
+					"claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,advanced-tool-use-2025-11-20,effort-2025-11-24,custom-beta,oauth-2025-04-20",
 			});
 
 			const prepared = provider.prepareHeaders(headers, "oauth-access-token");
 
 			expect(prepared.get("anthropic-beta")).toBe(
-				"claude-code-20250219,interleaved-thinking-2025-05-14,oauth-2025-04-20",
+				"claude-code-20250219,interleaved-thinking-2025-05-14,advanced-tool-use-2025-11-20,effort-2025-11-24,custom-beta,oauth-2025-04-20",
 			);
 		});
 
