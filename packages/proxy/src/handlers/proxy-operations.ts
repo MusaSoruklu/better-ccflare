@@ -296,6 +296,7 @@ export async function proxyWithAccount(
 	requestBodyBuffer: ArrayBuffer | null,
 	_createBodyStream: () => ReadableStream<Uint8Array> | undefined,
 	failoverAttempts: number,
+	isLastAccount: boolean,
 	ctx: ProxyContext,
 	apiKeyId?: string | null,
 	apiKeyName?: string | null,
@@ -408,7 +409,28 @@ export async function proxyWithAccount(
 			requestMeta,
 		);
 		if (isRateLimited) {
-			return null; // Signal to try next account
+			if (!isLastAccount) {
+				return null; // Signal to try next account
+			}
+
+			return forwardToClient(
+				{
+					requestId: requestMeta.id,
+					method: req.method,
+					path: url.pathname,
+					account,
+					requestHeaders: req.headers,
+					requestBody: requestBodyBuffer,
+					response,
+					timestamp: requestMeta.timestamp,
+					retryAttempt: 0,
+					failoverAttempts,
+					agentUsed: requestMeta.agentUsed,
+					apiKeyId,
+					apiKeyName,
+				},
+				{ ...ctx, provider },
+			);
 		}
 
 		// Forward response to client

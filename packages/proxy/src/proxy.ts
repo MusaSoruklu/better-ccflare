@@ -284,6 +284,7 @@ export async function handleProxy(
 			finalBodyBuffer,
 			finalCreateBodyStream,
 			i,
+			i === accounts.length - 1,
 			ctx,
 			apiKeyId,
 			apiKeyName,
