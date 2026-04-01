@@ -5,6 +5,9 @@ declare global {
 	}
 }
 
+const BASENAME_META_NAME = "better-ccflare-basename";
+const API_BASE_META_NAME = "better-ccflare-api-base";
+
 function trimTrailingSlash(value: string): string {
 	return value.replace(/\/+$/g, "");
 }
@@ -20,14 +23,29 @@ function isAbsoluteUrl(value: string): boolean {
 	return /^https?:\/\//i.test(value);
 }
 
+function readMetaContent(name: string): string {
+	if (typeof document === "undefined") return "";
+	const content =
+		document
+			.querySelector(`meta[name="${name}"]`)
+			?.getAttribute("content")
+			?.trim() || "";
+	return content;
+}
+
 export function getDashboardBasename(): string {
 	if (typeof window === "undefined") return "";
-	return normalizeBasePath(window.__BETTER_CCFLARE_BASENAME__);
+	const explicit =
+		readMetaContent(BASENAME_META_NAME) ||
+		(window.__BETTER_CCFLARE_BASENAME__ || "").trim();
+	return normalizeBasePath(explicit);
 }
 
 export function getDashboardApiBase(): string {
 	if (typeof window === "undefined") return "/api";
-	const explicit = (window.__BETTER_CCFLARE_API_BASE__ || "").trim();
+	const explicit =
+		readMetaContent(API_BASE_META_NAME) ||
+		(window.__BETTER_CCFLARE_API_BASE__ || "").trim();
 	if (explicit) {
 		if (isAbsoluteUrl(explicit)) return explicit;
 		return normalizeBasePath(explicit) || "/api";
