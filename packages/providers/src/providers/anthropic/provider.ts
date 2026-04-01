@@ -15,8 +15,30 @@ const HARD_LIMIT_STATUSES = new Set([
 
 // Soft warning statuses that should not block account usage
 const _SOFT_WARNING_STATUSES = new Set(["allowed_warning", "queueing_soft"]);
+const OAUTH_REQUIRED_BETA = "oauth-2025-04-20";
+const OAUTH_ALLOWED_BETAS = new Set([
+	"claude-code-20250219",
+	"interleaved-thinking-2025-05-14",
+	"redact-thinking-2026-02-12",
+	"context-management-2025-06-27",
+	"prompt-caching-scope-2026-01-05",
+	"fine-grained-tool-streaming-2025-05-14",
+	OAUTH_REQUIRED_BETA,
+]);
 
 const log = new Logger("AnthropicProvider");
+
+function sanitizeOauthBetaHeader(betaHeader: string | null): string {
+	const requested = (betaHeader || "")
+		.split(",")
+		.map((value) => value.trim())
+		.filter(Boolean);
+	const kept = requested.filter((value) => OAUTH_ALLOWED_BETAS.has(value));
+	if (!kept.includes(OAUTH_REQUIRED_BETA)) {
+		kept.push(OAUTH_REQUIRED_BETA);
+	}
+	return kept.join(",");
+}
 
 export class AnthropicProvider extends BaseProvider {
 	name = "anthropic";
@@ -218,18 +240,13 @@ export class AnthropicProvider extends BaseProvider {
 		// Set authentication header
 		if (accessToken) {
 			newHeaders.set("Authorization", `Bearer ${accessToken}`);
-			// Add required OAuth beta header for OAuth accounts
-			// This is needed when clients (like Claude Code with API key auth) don't include it
-			const betaHeader = newHeaders.get("anthropic-beta");
-			if (betaHeader) {
-				// Header exists, check if oauth value is already present
-				if (!betaHeader.includes("oauth-2025-04-20")) {
-					newHeaders.set("anthropic-beta", `${betaHeader},oauth-2025-04-20`);
-				}
-			} else {
-				// Header doesn't exist, create it
-				newHeaders.set("anthropic-beta", "oauth-2025-04-20");
-			}
+			// Claude subscription OAuth tokens are sensitive to beta capability mismatches.
+			// Keep the known Claude Code betas, drop unknown client-provided betas such as
+			// unsupported long-context flags, and always add the required OAuth beta.
+			newHeaders.set(
+				"anthropic-beta",
+				sanitizeOauthBetaHeader(newHeaders.get("anthropic-beta")),
+			);
 		} else if (apiKey) {
 			newHeaders.set("x-api-key", apiKey);
 		}

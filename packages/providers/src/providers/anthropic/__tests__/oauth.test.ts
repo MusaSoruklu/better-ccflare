@@ -23,8 +23,8 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 
 	const createTestConfig = (overrides: any = {}) => ({
 		clientId: "test-client-id",
-		redirectUri: "https://console.anthropic.com/oauth/code/callback",
-		tokenUrl: "https://console.anthropic.com/v1/oauth/token",
+		redirectUri: "https://platform.claude.com/oauth/code/callback",
+		tokenUrl: "https://platform.claude.com/v1/oauth/token",
 		mode: "claude-oauth",
 		...overrides,
 	});
@@ -154,7 +154,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 				state: "test-state-123",
 				grant_type: "authorization_code",
 				client_id: "test-client-id",
-				redirect_uri: "https://console.anthropic.com/oauth/code/callback",
+				redirect_uri: "https://platform.claude.com/oauth/code/callback",
 				code_verifier: "test-verifier",
 			});
 			mockFetch.mockRestore();
@@ -318,7 +318,7 @@ describe("AnthropicOAuthProvider - Claude OAuth Fixes", () => {
 			expect(requestBody.grant_type).toBe("authorization_code");
 			expect(requestBody.client_id).toBe("test-client-id");
 			expect(requestBody.redirect_uri).toBe(
-				"https://console.anthropic.com/oauth/code/callback",
+				"https://platform.claude.com/oauth/code/callback",
 			);
 			expect(requestBody.code_verifier).toBe("pkce-verifier-123");
 

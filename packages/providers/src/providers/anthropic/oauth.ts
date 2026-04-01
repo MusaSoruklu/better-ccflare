@@ -25,23 +25,23 @@ export class AnthropicOAuthProvider implements OAuthProvider {
 	getOAuthConfig(
 		mode: "console" | "claude-oauth" = "console",
 	): OAuthProviderConfig {
-		const baseUrl =
-			mode === "console"
-				? "https://console.anthropic.com"
-				: "https://claude.ai";
+		const isConsoleMode = mode === "console";
 
 		return {
-			authorizeUrl: `${baseUrl}/oauth/authorize`,
+			authorizeUrl: isConsoleMode
+				? "https://platform.claude.com/oauth/authorize"
+				: "https://claude.com/cai/oauth/authorize",
 			tokenUrl: "https://platform.claude.com/v1/oauth/token",
 			clientId: "", // Will be passed from config
-			scopes: [
-				"org:create_api_key",
-				"user:profile",
-				"user:inference",
-				"user:sessions:claude_code",
-				"user:mcp_servers",
-				"user:file_upload",
-			],
+			scopes: isConsoleMode
+				? ["org:create_api_key", "user:profile"]
+				: [
+						"user:profile",
+						"user:inference",
+						"user:sessions:claude_code",
+						"user:mcp_servers",
+						"user:file_upload",
+					],
 			redirectUri: "https://platform.claude.com/oauth/code/callback",
 			mode,
 		};

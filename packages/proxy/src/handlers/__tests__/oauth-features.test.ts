@@ -31,10 +31,10 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const _pkce = generatePKCE();
 
 			expect(config.mode).toBe("claude-oauth");
-			expect(config.authorizeUrl).toBe("https://claude.ai/oauth/authorize");
-			expect(config.scopes).toContain("org:create_api_key");
+			expect(config.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize");
 			expect(config.scopes).toContain("user:profile");
 			expect(config.scopes).toContain("user:inference");
+			expect(config.scopes).not.toContain("org:create_api_key");
 		});
 
 		it("should support console mode", () => {
@@ -43,9 +43,10 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			expect(config.mode).toBe("console");
 			expect(config.authorizeUrl).toBe(
-				"https://console.anthropic.com/oauth/authorize",
+				"https://platform.claude.com/oauth/authorize",
 			);
 			expect(config.scopes).toContain("org:create_api_key");
+			expect(config.scopes).not.toContain("user:inference");
 		});
 
 		it("should generate auth URLs for both modes", async () => {
@@ -56,8 +57,8 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const claudeUrl = oauthProvider.generateAuthUrl(claudeConfig, pkce);
 			const consoleUrl = oauthProvider.generateAuthUrl(consoleConfig, pkce);
 
-			expect(claudeUrl).toContain("claude.ai/oauth/authorize");
-			expect(consoleUrl).toContain("console.anthropic.com/oauth/authorize");
+			expect(claudeUrl).toContain("claude.com/cai/oauth/authorize");
+			expect(consoleUrl).toContain("platform.claude.com/oauth/authorize");
 
 			// Both should have PKCE challenge directly in the URL
 			expect(claudeUrl).toContain(`code_challenge=${pkce.challenge}`);
@@ -163,18 +164,18 @@ describe("OAuth Token Health Monitoring Features", () => {
 
 			// Both should have same token URL
 			expect(claudeConfig.tokenUrl).toBe(
-				"https://console.anthropic.com/v1/oauth/token",
+				"https://platform.claude.com/v1/oauth/token",
 			);
 			expect(consoleConfig.tokenUrl).toBe(
-				"https://console.anthropic.com/v1/oauth/token",
+				"https://platform.claude.com/v1/oauth/token",
 			);
 
 			// Both should have same redirect URI
 			expect(claudeConfig.redirectUri).toBe(
-				"https://console.anthropic.com/oauth/code/callback",
+				"https://platform.claude.com/oauth/code/callback",
 			);
 			expect(consoleConfig.redirectUri).toBe(
-				"https://console.anthropic.com/oauth/code/callback",
+				"https://platform.claude.com/oauth/code/callback",
 			);
 
 			// Both should require client ID
@@ -218,7 +219,7 @@ describe("OAuth Token Health Monitoring Features", () => {
 			const config = oauthProvider.getOAuthConfig("max" as any);
 
 			// Should be treated as claude-oauth
-			expect(config.authorizeUrl).toBe("https://claude.ai/oauth/authorize");
+			expect(config.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize");
 		});
 	});
 });
