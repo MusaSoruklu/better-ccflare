@@ -13,6 +13,19 @@ import type { ProxyContext } from "./proxy";
 
 const log = new Logger("AutoRefreshScheduler");
 
+export function readLocalProxySecret(): string | null {
+	const secret = process.env.CLAUDE_UPSTREAM_PROXY_SECRET?.trim() || "";
+	return secret || null;
+}
+
+export function isLocalProxyAuthFailure(bodyText: string): boolean {
+	if (!bodyText.trim()) return false;
+	return (
+		bodyText.includes('"type":"proxy_auth_required"') ||
+		bodyText.includes("Valid x-claude-proxy-secret is required")
+	);
+}
+
 /**
  * Auto-refresh scheduler that monitors accounts with auto-refresh enabled
  * and sends dummy messages when their usage window resets
@@ -314,6 +327,10 @@ export class AutoRefreshScheduler {
 				// CRITICAL: Bypass session tracking for auto-refresh messages
 				"x-better-ccflare-bypass-session": "true",
 			});
+			const localProxySecret = readLocalProxySecret();
+			if (localProxySecret) {
+				headers.set("x-claude-proxy-secret", localProxySecret);
+			}
 
 			// Try sending with multiple models if needed
 			let response: Response | null = null;
@@ -391,6 +408,17 @@ export class AutoRefreshScheduler {
 
 			// Handle authentication errors specifically
 			if (response.status === 401) {
+				const errorBody = await response
+					.clone()
+					.text()
+					.catch(() => "");
+				if (isLocalProxyAuthFailure(errorBody)) {
+					log.error(
+						`Auto-refresh for ${accountRow.name} was rejected by local proxy auth. CLAUDE_UPSTREAM_PROXY_SECRET is missing or incorrect for the scheduler runtime.`,
+					);
+					return false;
+				}
+
 				log.error(
 					`❌ AUTHENTICATION FAILED: Account "${accountRow.name}" needs manual reauthentication`,
 				);
