@@ -16,6 +16,7 @@ import {
 	createAccountResumeHandler,
 	createAccountUnquarantineHandler,
 	createAccountsListHandler,
+	createAccountsUsageRefreshHandler,
 	createAlibabaCodingPlanAccountAddHandler,
 	createAnthropicCompatibleAccountAddHandler,
 	createAwsProfilesListHandler,
@@ -101,6 +102,10 @@ export class APIRouter {
 		const statsHandler = createStatsHandler(dbOps);
 		const statsResetHandler = createStatsResetHandler(dbOps);
 		const accountsHandler = createAccountsListHandler(dbOps);
+		const accountsUsageRefreshHandler = createAccountsUsageRefreshHandler(
+			dbOps,
+			config,
+		);
 		const accountAddHandler = createAccountAddHandler(dbOps, config);
 		const zaiAccountAddHandler = createZaiAccountAddHandler(dbOps);
 		const minimaxAccountAddHandler = createMinimaxAccountAddHandler(dbOps);
@@ -145,6 +150,9 @@ export class APIRouter {
 		this.handlers.set("GET:/api/stats", (_req, url) => statsHandler(url));
 		this.handlers.set("POST:/api/stats/reset", () => statsResetHandler());
 		this.handlers.set("GET:/api/accounts", () => accountsHandler());
+		this.handlers.set("POST:/api/accounts/refresh-usage", (req) =>
+			accountsUsageRefreshHandler(req),
+		);
 		this.handlers.set("POST:/api/accounts", (req) => accountAddHandler(req));
 		this.handlers.set("POST:/api/accounts/zai", (req) =>
 			zaiAccountAddHandler(req),

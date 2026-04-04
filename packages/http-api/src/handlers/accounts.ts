@@ -24,6 +24,7 @@ import {
 import { Logger } from "@better-ccflare/logger";
 import {
 	fetchUsageData,
+	getProvider,
 	getRepresentativeUtilization,
 	getRepresentativeWindow,
 	parseCodexUsageHeaders,
@@ -36,7 +37,6 @@ import { decryptAccountCredentialRow } from "@better-ccflare/database";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
-
 function normalizeCodexUsageData(usage: UsageData): UsageData | null {
 	const normalized: UsageData = {
 		five_hour: { ...usage.five_hour },
@@ -117,6 +117,78 @@ async function getCachedOrPersistedCodexUsage(
 	}
 
 	return null;
+}
+
+async function refreshAnthropicAccountUsage(params: {
+	accountId: string;
+	dbOps: DatabaseOperations;
+	config: Config;
+}): Promise<{
+	accountId: string;
+	accountName: string;
+	refreshedToken: boolean;
+	usageData: UsageData | null;
+	usageUtilization: number | null;
+	usageWindow: string | null;
+	retryAfterMs: number | null;
+}> {
+	const account = await params.dbOps.getAccount(params.accountId);
+	if (!account) {
+		throw NotFound("Account not found");
+	}
+	if (account.provider !== "anthropic") {
+		throw BadRequest("Usage refresh is only available for Anthropic accounts");
+	}
+	if (!account.refresh_token && !account.access_token) {
+		throw BadRequest(
+			"Anthropic account is missing both refresh token and access token",
+		);
+	}
+
+	let accessToken = account.access_token ?? "";
+	let refreshedToken = false;
+	if (account.refresh_token) {
+		const provider = getProvider(account.provider);
+		if (!provider) {
+			throw new Error(`No provider available for account ${account.name}`);
+		}
+		const result = await provider.refreshToken(
+			account,
+			params.config.getRuntime().clientId,
+		);
+		await params.dbOps.updateAccountTokens(
+			account.id,
+			result.accessToken,
+			result.expiresAt,
+			result.refreshToken,
+		);
+		account.access_token = result.accessToken;
+		account.expires_at = result.expiresAt;
+		if (result.refreshToken) {
+			account.refresh_token = result.refreshToken;
+		}
+		accessToken = result.accessToken;
+		refreshedToken = true;
+	}
+
+	if (!accessToken) {
+		throw new Error(`No usable access token available for ${account.name}`);
+	}
+
+	const { data: usageData, retryAfterMs } = await fetchUsageData(accessToken);
+	if (usageData) {
+		usageCache.set(account.id, usageData);
+	}
+
+	return {
+		accountId: account.id,
+		accountName: account.name,
+		refreshedToken,
+		usageData,
+		usageUtilization: usageData ? getRepresentativeUtilization(usageData) : null,
+		usageWindow: usageData ? getRepresentativeWindow(usageData) : null,
+		retryAfterMs,
+	};
 }
 
 /**
@@ -475,6 +547,75 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 		);
 
 		return jsonResponse(response);
+	};
+}
+
+export function createAccountsUsageRefreshHandler(
+	dbOps: DatabaseOperations,
+	config: Config,
+) {
+	return async (req: Request): Promise<Response> => {
+		try {
+			const body = (await req.json().catch(() => ({}))) as {
+				accountIds?: unknown;
+			};
+			const requestedAccountIds = Array.isArray(body.accountIds)
+				? body.accountIds
+						.map((value) => (typeof value === "string" ? value.trim() : ""))
+						.filter(Boolean)
+				: null;
+
+			const accounts = await dbOps.getAllAccounts();
+			const selectedAccounts = accounts.filter((account) => {
+				if (account.provider !== "anthropic") return false;
+				if (requestedAccountIds && !requestedAccountIds.includes(account.id)) {
+					return false;
+				}
+				return true;
+			});
+
+			const results = [];
+			for (const account of selectedAccounts) {
+				try {
+					const result = await refreshAnthropicAccountUsage({
+						accountId: account.id,
+						dbOps,
+						config,
+					});
+					results.push({
+						accountId: result.accountId,
+						accountName: result.accountName,
+						success: Boolean(result.usageData),
+						refreshedToken: result.refreshedToken,
+						usageUtilization: result.usageUtilization,
+						usageWindow: result.usageWindow,
+						retryAfterMs: result.retryAfterMs,
+					});
+				} catch (error) {
+					results.push({
+						accountId: account.id,
+						accountName: account.name,
+						success: false,
+						error:
+							error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+
+			return jsonResponse({
+				success: results.some((entry) => entry.success),
+				totalAccounts: selectedAccounts.length,
+				refreshedAccounts: results.filter((entry) => entry.success).length,
+				results,
+			});
+		} catch (error) {
+			log.error("Accounts usage refresh error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to refresh account usage"),
+			);
+		}
 	};
 }
 
