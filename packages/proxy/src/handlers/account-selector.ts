@@ -21,7 +21,7 @@ function usageStopPercent(): number {
 		process.env.CLAUDE_UPSTREAM_STOP_AT_UTILIZATION_PERCENT?.trim() || "",
 	);
 	if (!Number.isFinite(parsed) || parsed <= 0) {
-		return 90;
+		return 100;
 	}
 	return Math.max(1, Math.min(100, Math.round(parsed)));
 }
