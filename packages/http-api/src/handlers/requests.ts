@@ -60,6 +60,8 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			output_tokens_per_second: number | null;
 			api_key_id: string | null;
 			api_key_name: string | null;
+			billing_type: string | null;
+			combo_name: string | null;
 		}>(
 			`
 			SELECT r.*, a.name as account_name
@@ -96,6 +98,8 @@ export function createRequestsSummaryHandler(db: BunSqlAdapter) {
 			tokensPerSecond: request.output_tokens_per_second || undefined,
 			apiKeyId: request.api_key_id || undefined,
 			apiKeyName: request.api_key_name || undefined,
+			billingType: request.billing_type || undefined,
+			comboName: request.combo_name || undefined,
 		}));
 
 		return jsonResponse(response);
@@ -169,8 +173,8 @@ export function createRequestsDetailHandler(dbOps: DatabaseOperations) {
  * This endpoint supports the performance optimization that eliminates JSON parsing bottleneck
  */
 export function createRequestPayloadHandler(dbOps: DatabaseOperations) {
-	return (requestId: string): Response => {
-		const payload = dbOps.getRequestPayload(requestId);
+	return async (requestId: string): Promise<Response> => {
+		const payload = await dbOps.getRequestPayload(requestId);
 
 		if (!payload) {
 			return new Response(JSON.stringify({ error: "Request not found" }), {

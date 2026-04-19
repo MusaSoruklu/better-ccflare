@@ -23,8 +23,20 @@ export interface StartMessage {
 	// Provider info for rate limit parsing
 	providerName: string;
 
+	// Account billing type override (null = use provider heuristic)
+	accountBillingType: string | null;
+
+	// Account auto-pause-on-overage flag (1 = enabled, 0 = disabled, null = not set)
+	accountAutoPauseOnOverageEnabled: number | null;
+
+	// Account name for logging
+	accountName: string | null;
+
 	// Agent info
 	agentUsed: string | null;
+
+	// Combo info
+	comboName: string | null;
 
 	// API key info
 	apiKeyId: string | null;
@@ -53,11 +65,17 @@ export interface ControlMessage {
 	type: "shutdown";
 }
 
+export interface ConfigUpdateMessage {
+	type: "config-update";
+	storePayloads: boolean;
+}
+
 export type WorkerMessage =
 	| StartMessage
 	| ChunkMessage
 	| EndMessage
 	| ControlMessage
+	| ConfigUpdateMessage
 	| SummaryMessage;
 
 // Response from worker (if needed in future)

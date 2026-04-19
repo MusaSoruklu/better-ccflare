@@ -3,7 +3,15 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { RuntimeConfig } from "@better-ccflare/config";
 import type { Disposable } from "@better-ccflare/core";
-import type { Account, StrategyStore } from "@better-ccflare/types";
+import type {
+	Account,
+	Combo,
+	ComboFamily,
+	ComboFamilyAssignment,
+	ComboSlot,
+	ComboWithSlots,
+	StrategyStore,
+} from "@better-ccflare/types";
 import { BunSqlAdapter } from "./adapters/bun-sql-adapter";
 import { requireCredentialEncryptionKey } from "./credential-crypto";
 import { ensureSchema, runMigrations } from "./migrations";
@@ -12,6 +20,7 @@ import { resolveDbPath } from "./paths";
 import { AccountRepository } from "./repositories/account.repository";
 import { AgentPreferenceRepository } from "./repositories/agent-preference.repository";
 import { ApiKeyRepository } from "./repositories/api-key.repository";
+import { ComboRepository } from "./repositories/combo.repository";
 import { OAuthRepository } from "./repositories/oauth.repository";
 import {
 	type RequestData,
@@ -165,6 +174,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	private stats: StatsRepository;
 	private agentPreferences: AgentPreferenceRepository;
 	private apiKeys: ApiKeyRepository;
+	private combo: ComboRepository;
 
 	constructor(
 		dbPath?: string,
@@ -252,6 +262,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		this.stats = new StatsRepository(this.adapter);
 		this.agentPreferences = new AgentPreferenceRepository(this.adapter);
 		this.apiKeys = new ApiKeyRepository(this.adapter);
+		this.combo = new ComboRepository(this.adapter);
 	}
 
 	/**
@@ -452,6 +463,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		await this.accounts.resetSession(accountId, timestamp);
 	}
 
+	async setAccountBillingType(
+		accountId: string,
+		billingType: string | null,
+	): Promise<void> {
+		await this.accounts.setBillingType(accountId, billingType);
+	}
+
 	async updateAccountRequestCount(
 		accountId: string,
 		count: number,
@@ -473,6 +491,13 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		await this.accounts.setAutoFallbackEnabled(accountId, enabled);
 	}
 
+	async setAutoPauseOnOverageEnabled(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		await this.accounts.setAutoPauseOnOverageEnabled(accountId, enabled);
+	}
+
 	async hasAccountsForProvider(provider: string): Promise<boolean> {
 		return this.accounts.hasAccountsForProvider(provider);
 	}
@@ -487,6 +512,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		timestamp?: number,
 		apiKeyId?: string,
 		apiKeyName?: string,
+		project?: string | null,
 	): Promise<void> {
 		await withDatabaseRetry(
 			() =>
@@ -499,6 +525,7 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 					timestamp,
 					apiKeyId,
 					apiKeyName,
+					project,
 				),
 			this.retryConfig,
 			"saveRequestMeta",
@@ -519,6 +546,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 		agentUsed?: string,
 		apiKeyId?: string,
 		apiKeyName?: string,
+		project?: string | null,
+		billingType?: string,
+		comboName?: string | null,
 	): Promise<void> {
 		await withDatabaseRetry(
 			() =>
@@ -536,6 +566,9 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 					agentUsed,
 					apiKeyId,
 					apiKeyName,
+					project,
+					billingType,
+					comboName,
 				}),
 			this.retryConfig,
 			"saveRequest",
@@ -957,5 +990,80 @@ export class DatabaseOperations implements StrategyStore, Disposable {
 	 */
 	getStatsRepository(): StatsRepository {
 		return this.stats;
+	}
+
+	// ── Combo operations delegated to repository ──────────────────────────────
+
+	async createCombo(name: string, description?: string | null): Promise<Combo> {
+		return this.combo.create(name, description);
+	}
+
+	async listCombos(): Promise<Combo[]> {
+		return this.combo.findAll();
+	}
+
+	async getCombo(id: string): Promise<Combo | null> {
+		return this.combo.findById(id);
+	}
+
+	async updateCombo(
+		id: string,
+		fields: Partial<{
+			name: string;
+			description: string | null;
+			enabled: boolean;
+		}>,
+	): Promise<Combo> {
+		return this.combo.update(id, fields);
+	}
+
+	async deleteCombo(id: string): Promise<void> {
+		await this.combo.delete(id);
+	}
+
+	async addComboSlot(
+		comboId: string,
+		accountId: string,
+		model: string,
+		priority: number,
+	): Promise<ComboSlot> {
+		return this.combo.addSlot(comboId, accountId, model, priority);
+	}
+
+	async updateComboSlot(
+		slotId: string,
+		fields: Partial<{ model: string; priority: number; enabled: boolean }>,
+	): Promise<ComboSlot> {
+		return this.combo.updateSlot(slotId, fields);
+	}
+
+	async removeComboSlot(slotId: string): Promise<void> {
+		await this.combo.removeSlot(slotId);
+	}
+
+	async getComboSlots(comboId: string): Promise<ComboSlot[]> {
+		return this.combo.getSlots(comboId);
+	}
+
+	async reorderComboSlots(comboId: string, slotIds: string[]): Promise<void> {
+		await this.combo.reorderSlots(comboId, slotIds);
+	}
+
+	async setFamilyCombo(
+		family: ComboFamily,
+		comboId: string | null,
+		enabled: boolean,
+	): Promise<void> {
+		await this.combo.setFamilyAssignment(family, comboId, enabled);
+	}
+
+	async getFamilyAssignments(): Promise<ComboFamilyAssignment[]> {
+		return this.combo.getFamilyAssignments();
+	}
+
+	async getActiveComboForFamily(
+		family: ComboFamily,
+	): Promise<ComboWithSlots | null> {
+		return this.combo.getActiveComboForFamily(family);
 	}
 }

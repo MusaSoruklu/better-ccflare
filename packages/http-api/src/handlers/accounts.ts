@@ -31,9 +31,13 @@ import {
 	type UsageData,
 	usageCache,
 } from "@better-ccflare/providers";
-import { clearAccountRefreshCache } from "@better-ccflare/proxy";
+import {
+	clearAccountRefreshCache,
+	restartUsagePollingForAccount,
+} from "@better-ccflare/proxy";
 import type { FullUsageData } from "@better-ccflare/types";
 import { decryptAccountCredentialRow } from "@better-ccflare/database";
+import { requiresSessionDurationTracking } from "@better-ccflare/types";
 import type { AccountResponse } from "../types";
 
 const log = new Logger("AccountsHandler");
@@ -224,12 +228,15 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 			session_info: string | null;
 			auto_fallback_enabled: 0 | 1;
 			auto_refresh_enabled: 0 | 1;
+			auto_pause_on_overage_enabled: 0 | 1;
 			custom_endpoint: string | null;
 			model_mappings: string | null;
 			cross_region_mode: string | null;
 			quarantined: 0 | 1;
 			quarantined_at: number | null;
 			quarantine_reason: string | null;
+			model_fallbacks: string | null;
+			billing_type: string | null;
 		}>(
 			`
 				SELECT
@@ -254,11 +261,15 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					COALESCE(auto_fallback_enabled, 0) as auto_fallback_enabled,
 					COALESCE(auto_refresh_enabled, 0) as auto_refresh_enabled,
 					custom_endpoint,
+					COALESCE(auto_pause_on_overage_enabled, 0) as auto_pause_on_overage_enabled,
+
 					model_mappings,
 					cross_region_mode,
 					COALESCE(quarantined, 0) as quarantined,
 					quarantined_at,
 					quarantine_reason,
+					model_fallbacks,
+					billing_type,
 					CASE
 						WHEN expires_at > ? THEN 1
 						ELSE 0
@@ -323,6 +334,19 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 				}
 			}),
 		);
+
+		// Fetch session-window token stats only for providers with session-based limits
+		const sessionStatsMap = await dbOps
+			.getStatsRepository()
+			.getSessionStats(
+				accounts
+					.filter((a) => requiresSessionDurationTracking(a.provider ?? ""))
+					.map((a) => ({
+						id: a.id,
+						session_start: a.session_start ? Number(a.session_start) : null,
+					})),
+			)
+			.catch(() => new Map());
 
 		const response: AccountResponse[] = await Promise.all(
 			hydratedAccounts.map(async (account) => {
@@ -467,15 +491,7 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 
 				// Parse model mappings for OpenAI-compatible, Anthropic-compatible, NanoGPT, and OpenRouter providers
 				let modelMappings: { [key: string]: string } | null = null;
-				if (
-					(account.provider === "openai-compatible" ||
-						account.provider === "anthropic-compatible" ||
-						account.provider === "nanogpt" ||
-						account.provider === "openrouter" ||
-						account.provider === "alibaba-coding-plan" ||
-						account.provider === "zai") &&
-					account.model_mappings
-				) {
+				if (account.model_mappings) {
 					try {
 						const parsed = JSON.parse(account.model_mappings);
 						// Handle both formats: direct mappings or wrapped in modelMappings
@@ -497,6 +513,17 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					} catch {
 						// If parsing fails, ignore model mappings
 						modelMappings = null;
+					}
+				}
+
+				// Parse model fallbacks for all providers
+				let modelFallbacks: { [key: string]: string } | null = null;
+				if (account.model_fallbacks) {
+					try {
+						const parsed = JSON.parse(account.model_fallbacks);
+						modelFallbacks = parsed.modelFallbacks || parsed || null;
+					} catch {
+						modelFallbacks = null;
 					}
 				}
 
@@ -530,6 +557,8 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 					sessionInfo: account.session_info || "",
 					autoFallbackEnabled: account.auto_fallback_enabled === 1,
 					autoRefreshEnabled: account.auto_refresh_enabled === 1,
+					autoPauseOnOverageEnabled:
+						account.auto_pause_on_overage_enabled === 1,
 					customEndpoint: account.custom_endpoint,
 					modelMappings,
 					usageUtilization,
@@ -542,6 +571,9 @@ export function createAccountsListHandler(dbOps: DatabaseOperations) {
 						? new Date(Number(account.quarantined_at)).toISOString()
 						: null,
 					quarantineReason: account.quarantine_reason ?? null,
+					modelFallbacks,
+					billingType: account.billing_type,
+					sessionStats: sessionStatsMap.get(account.id) ?? null,
 				};
 			}),
 		);
@@ -676,7 +708,7 @@ export function createAccountAddHandler(
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -990,7 +1022,7 @@ export function createAccountRenameHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1053,7 +1085,7 @@ export function createZaiAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1217,7 +1249,7 @@ export function createOpenAIAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1380,7 +1412,7 @@ export function createVertexAIAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1517,7 +1549,7 @@ export function createMinimaxAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -1648,7 +1680,7 @@ export function createNanoGPTAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 			if (!name) {
@@ -1818,7 +1850,7 @@ export function createAnthropicCompatibleAccountAddHandler(
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -2024,6 +2056,131 @@ export function createAccountAutoFallbackHandler(dbOps: DatabaseOperations) {
 }
 
 /**
+ * Create an account auto-pause-on-overage toggle handler
+ */
+export function createAccountAutoPauseOnOverageHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			// Validate enabled parameter
+			const enabled = validateNumber(body.enabled, "enabled", {
+				required: true,
+				allowedValues: [0, 1] as const,
+			});
+
+			if (enabled === undefined) {
+				return errorResponse(BadRequest("Enabled field is required (0 or 1)"));
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Check if account is Anthropic provider (only Anthropic accounts have overage detection)
+			if (account.provider !== "anthropic") {
+				return errorResponse(
+					BadRequest(
+						"Auto-pause on overage is only available for Anthropic accounts",
+					),
+				);
+			}
+
+			// Update auto-pause-on-overage setting
+			dbOps.setAutoPauseOnOverageEnabled(accountId, enabled === 1);
+
+			const action = enabled === 1 ? "enabled" : "disabled";
+
+			return jsonResponse({
+				success: true,
+				message: `Auto-pause on overage ${action} for account '${account.name}'`,
+				autoPauseOnOverageEnabled: enabled === 1,
+			});
+		} catch (error) {
+			log.error("Account auto-pause-on-overage toggle error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to toggle auto-pause-on-overage"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account billing type handler
+ */
+export function createAccountBillingTypeHandler(dbOps: DatabaseOperations) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const billingType = validateString(body.billingType, "billingType", {
+				required: true,
+				allowedValues: ["plan", "api", "auto"],
+			});
+
+			if (billingType === undefined) {
+				return errorResponse(
+					BadRequest("billingType must be 'plan', 'api', or 'auto'"),
+				);
+			}
+
+			// Check if account exists
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ name: string; provider: string }>(
+				"SELECT name, provider FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Only allow custom billing type for compatible providers
+			if (
+				!["anthropic-compatible", "openai-compatible"].includes(
+					account.provider,
+				)
+			) {
+				return errorResponse(
+					BadRequest(
+						"Custom billing type is only available for anthropic-compatible and openai-compatible providers",
+					),
+				);
+			}
+
+			await dbOps.setAccountBillingType(
+				accountId,
+				billingType === "auto" ? null : billingType,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: `Billing type set to '${billingType}' for account '${account.name}'`,
+				billingType,
+			});
+		} catch (error) {
+			log.error("Account billing type update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update billing type"),
+			);
+		}
+	};
+}
+
+/**
  * Create an account auto-refresh toggle handler
  */
 export function createAccountAutoRefreshHandler(dbOps: DatabaseOperations) {
@@ -2052,10 +2209,16 @@ export function createAccountAutoRefreshHandler(dbOps: DatabaseOperations) {
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			// Check if account is Anthropic provider (only Anthropic accounts have rate limit windows)
-			if (account.provider !== "anthropic") {
+			// Check if account provider supports auto-refresh (session-window based providers)
+			if (
+				account.provider !== "anthropic" &&
+				account.provider !== "codex" &&
+				account.provider !== "zai"
+			) {
 				return errorResponse(
-					BadRequest("Auto-refresh is only available for Anthropic accounts"),
+					BadRequest(
+						"Auto-refresh is only available for Anthropic, Codex, and Zai accounts",
+					),
 				);
 			}
 
@@ -2162,45 +2325,51 @@ export function createAccountModelMappingsUpdateHandler(
 				return errorResponse(NotFound("Account not found"));
 			}
 
-			const MODEL_MAPPING_PROVIDERS = [
-				"openai-compatible",
-				"anthropic-compatible",
-				"nanogpt",
-				"openrouter",
-				"kilo",
-				"alibaba-coding-plan",
-				"zai",
-			];
-			if (!MODEL_MAPPING_PROVIDERS.includes(account.provider)) {
-				return errorResponse(
-					BadRequest(
-						"Model mappings are only available for OpenAI-compatible, Anthropic-compatible, NanoGPT, OpenRouter, Kilo, Alibaba, and z.ai accounts",
-					),
-				);
-			}
-
 			// Handle model mappings update
-			const modelMappings: { [key: string]: string } = (body.modelMappings ||
-				{}) as { [key: string]: string };
+			const modelMappings = body.modelMappings || {};
 
-			// Validate model mappings
+			// Validate model mappings - values can be string or string[]
 			if (typeof modelMappings !== "object" || Array.isArray(modelMappings)) {
 				return errorResponse(BadRequest("Model mappings must be an object"));
 			}
 
-			// Ensure modelMappings is a record with string values
-			if (modelMappings) {
-				for (const [_key, value] of Object.entries(modelMappings)) {
-					if (typeof value !== "string") {
+			for (const [_key, value] of Object.entries(modelMappings)) {
+				if (typeof value === "string") {
+					if (!value.trim()) {
 						return errorResponse(
-							BadRequest("All model mapping values must be strings"),
+							BadRequest(
+								`Model mapping value for key '${_key}' must not be empty`,
+							),
 						);
 					}
+				} else if (Array.isArray(value)) {
+					if (value.length === 0) {
+						return errorResponse(
+							BadRequest(
+								`Model mapping array for key '${_key}' must not be empty`,
+							),
+						);
+					}
+					for (const item of value) {
+						if (typeof item !== "string" || !item.trim()) {
+							return errorResponse(
+								BadRequest(
+									`All model mapping array values for key '${_key}' must be non-empty strings`,
+								),
+							);
+						}
+					}
+				} else {
+					return errorResponse(
+						BadRequest(
+							"Model mapping values must be strings or arrays of strings",
+						),
+					);
 				}
 			}
 
 			// Get existing model mappings from the dedicated field
-			let existingModelMappings: { [key: string]: string } = {};
+			let existingModelMappings: Record<string, string | string[]> = {};
 			const result = await db.get<{ model_mappings: string | null }>(
 				"SELECT model_mappings FROM accounts WHERE id = ?",
 				[accountId],
@@ -2210,10 +2379,8 @@ export function createAccountModelMappingsUpdateHandler(
 			if (existingModelMappingsStr) {
 				try {
 					const parsed = JSON.parse(existingModelMappingsStr);
-					// Handle both formats: direct mappings or wrapped in modelMappings
 					existingModelMappings = parsed.modelMappings || parsed || {};
 				} catch {
-					// If parsing fails, ignore existing mappings
 					existingModelMappings = {};
 				}
 			}
@@ -2221,14 +2388,23 @@ export function createAccountModelMappingsUpdateHandler(
 			// Merge new model mappings with existing ones
 			const mergedModelMappings = { ...existingModelMappings };
 
-			// Update or remove model mappings based on the input
 			for (const [modelType, modelValue] of Object.entries(modelMappings)) {
-				if (!modelValue || modelValue.trim() === "") {
-					// Remove the mapping if value is empty
-					delete mergedModelMappings[modelType];
-				} else {
-					// Update the mapping
-					mergedModelMappings[modelType] = modelValue.trim();
+				if (typeof modelValue === "string") {
+					if (!modelValue.trim()) {
+						delete mergedModelMappings[modelType];
+					} else {
+						mergedModelMappings[modelType] = modelValue.trim();
+					}
+				} else if (Array.isArray(modelValue)) {
+					const trimmed = modelValue
+						.map((v) => (typeof v === "string" ? v.trim() : ""))
+						.filter(Boolean);
+					if (trimmed.length > 0) {
+						mergedModelMappings[modelType] =
+							trimmed.length === 1 ? trimmed[0] : trimmed;
+					} else {
+						delete mergedModelMappings[modelType];
+					}
 				}
 			}
 
@@ -2256,6 +2432,104 @@ export function createAccountModelMappingsUpdateHandler(
 				error instanceof Error
 					? error
 					: new Error("Failed to update model mappings"),
+			);
+		}
+	};
+}
+
+/**
+ * Create an account model fallbacks update handler.
+ * @deprecated Fallbacks are now merged into model_mappings as arrays.
+ * This handler appends fallback models to existing model_mappings arrays.
+ */
+export function createAccountModelFallbacksUpdateHandler(
+	dbOps: DatabaseOperations,
+) {
+	return async (req: Request, accountId: string): Promise<Response> => {
+		try {
+			const body = await req.json();
+
+			const db = dbOps.getAdapter();
+			const account = await db.get<{ id: string }>(
+				"SELECT id FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			// Validate fallbacks input
+			const modelFallbacks = body.modelFallbacks || {};
+			if (typeof modelFallbacks !== "object" || Array.isArray(modelFallbacks)) {
+				return errorResponse(BadRequest("Model fallbacks must be an object"));
+			}
+			for (const [_key, value] of Object.entries(modelFallbacks)) {
+				if (typeof value !== "string" || !value.trim()) {
+					return errorResponse(
+						BadRequest("All model fallback values must be non-empty strings"),
+					);
+				}
+			}
+
+			// Get existing model_mappings and merge fallbacks into them
+			let existingMappings: Record<string, string | string[]> = {};
+			const result = await db.get<{ model_mappings: string | null }>(
+				"SELECT model_mappings FROM accounts WHERE id = ?",
+				[accountId],
+			);
+
+			if (result?.model_mappings) {
+				try {
+					const parsed = JSON.parse(result.model_mappings);
+					existingMappings = parsed.modelMappings || parsed || {};
+				} catch {
+					existingMappings = {};
+				}
+			}
+
+			// Merge: for each fallback, append to existing mapping array
+			for (const [modelType, fallbackValue] of Object.entries(modelFallbacks)) {
+				const existing = existingMappings[modelType];
+				const fallback = (fallbackValue as string).trim();
+
+				if (typeof existing === "string") {
+					// Promote single string to array with fallback appended
+					existingMappings[modelType] = [existing, fallback];
+				} else if (Array.isArray(existing)) {
+					if (!existing.includes(fallback)) {
+						existingMappings[modelType] = [...existing, fallback];
+					}
+				} else {
+					existingMappings[modelType] = fallback;
+				}
+			}
+
+			const finalMappings =
+				Object.keys(existingMappings).length > 0
+					? JSON.stringify(existingMappings)
+					: null;
+
+			await db.run(
+				"UPDATE accounts SET model_mappings = ?, model_fallbacks = NULL WHERE id = ?",
+				[finalMappings, accountId],
+			);
+
+			log.info(
+				`Merged model fallbacks into model_mappings for account ${accountId}`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: "Model fallbacks merged into model mappings",
+				modelMappings: existingMappings,
+			});
+		} catch (error) {
+			log.error("Account model fallbacks update error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to update model fallbacks"),
 			);
 		}
 	};
@@ -2483,7 +2757,7 @@ export function createBedrockAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -2663,7 +2937,7 @@ export function createKiloAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -2815,7 +3089,7 @@ export function createAlibabaCodingPlanAccountAddHandler(
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -2962,7 +3236,7 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 				maxLength: 100,
 				pattern: patterns.accountName,
 				patternErrorMessage:
-					"can only contain letters, numbers, spaces, hyphens, and underscores",
+					"can only contain letters, numbers, spaces, hyphens, underscores, and dots",
 				transform: sanitizers.trim,
 			});
 
@@ -3098,6 +3372,61 @@ export function createOpenRouterAccountAddHandler(dbOps: DatabaseOperations) {
 				error instanceof Error
 					? error
 					: new Error("Failed to create OpenRouter account"),
+			);
+		}
+	};
+}
+
+/**
+ * Force an immediate usage data refresh for an Anthropic OAuth account.
+ * Clears the refresh cache, restarts usage polling (which refreshes the token
+ * if expired), and returns whether polling was successfully restarted.
+ */
+export function createAccountRefreshUsageHandler(dbOps: DatabaseOperations) {
+	return async (_req: Request, accountId: string): Promise<Response> => {
+		try {
+			const account = await dbOps.getAccount(accountId);
+
+			if (!account) {
+				return errorResponse(NotFound("Account not found"));
+			}
+
+			if (account.provider !== "anthropic") {
+				return errorResponse(
+					BadRequest(
+						"Usage refresh is only available for Anthropic OAuth accounts",
+					),
+				);
+			}
+
+			if (!account.access_token && !account.refresh_token) {
+				return errorResponse(
+					BadRequest(
+						`Account '${account.name}' has no tokens - please re-authenticate`,
+					),
+				);
+			}
+
+			clearAccountRefreshCache(accountId);
+			const pollingRestarted = await restartUsagePollingForAccount(accountId);
+
+			log.info(
+				`Usage refresh requested for account '${account.name}' (polling restarted: ${pollingRestarted})`,
+			);
+
+			return jsonResponse({
+				success: true,
+				message: pollingRestarted
+					? `Usage polling restarted for account '${account.name}'. Fresh usage data will appear within 5-10 seconds.`
+					: `Usage cache cleared for account '${account.name}'. Note: server-side polling could not be restarted - usage data may not update until a request is proxied.`,
+				pollingRestarted,
+			});
+		} catch (error) {
+			log.error("Account refresh usage error:", error);
+			return errorResponse(
+				error instanceof Error
+					? error
+					: new Error("Failed to refresh usage data"),
 			);
 		}
 	};

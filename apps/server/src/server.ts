@@ -16,7 +16,11 @@ import {
 } from "@better-ccflare/core";
 import { container, SERVICE_KEYS } from "@better-ccflare/core-di";
 import type { DatabaseOperations } from "@better-ccflare/database";
-import { AsyncDbWriter, DatabaseFactory } from "@better-ccflare/database";
+import {
+	AsyncDbWriter,
+	DatabaseFactory,
+	initPayloadEncryption,
+} from "@better-ccflare/database";
 import { APIRouter, AuthService } from "@better-ccflare/http-api";
 import { SessionStrategy } from "@better-ccflare/load-balancer";
 import { Logger } from "@better-ccflare/logger";
@@ -32,7 +36,9 @@ import {
 	getValidAccessToken,
 	handleProxy,
 	type ProxyContext,
+	registerPollingRestarter,
 	registerRefreshClearer,
+	sendWorkerConfigUpdate,
 	startGlobalTokenHealthChecks,
 	stopGlobalTokenHealthChecks,
 	terminateUsageWorker,
@@ -279,6 +285,7 @@ function startUsagePollingWithRefresh(
 	account: Account,
 	proxyContext: ProxyContext,
 	startupDelayMs: number = 0,
+	intervalMs: number = 90000,
 ) {
 	const logger = new Logger("UsagePolling");
 	const MAX_RETRY_ATTEMPTS = 10;
@@ -330,7 +337,19 @@ function startUsagePollingWithRefresh(
 				account.id,
 				tokenProvider,
 				account.provider,
-				90000, // Poll every 90s
+				intervalMs,
+				undefined, // customEndpoint
+				(accountId) => {
+					// Usage window has rolled over — reset session tracking so the
+					// dashboard reflects the new window without waiting for the next request.
+					proxyContext.dbOps
+						.resetAccountSession(accountId, Date.now())
+						.catch((err) =>
+							logger.warn(
+								`Failed to reset session for account ${accountId} on window reset: ${err}`,
+							),
+						);
+				},
 			);
 
 			// Reset retry count on success
@@ -523,6 +542,13 @@ export default async function startServer(options?: {
 	container.registerInstance(SERVICE_KEYS.Config, new Config());
 	container.registerInstance(SERVICE_KEYS.Logger, new Logger("Server"));
 
+	// Initialize payload encryption (no-op if PAYLOAD_ENCRYPTION_KEY is unset).
+	// This must run before any database operations that read/write payloads.
+	// NOTE: this only initializes the main thread; the post-processor worker
+	// runs `initPayloadEncryption()` itself at module load — Bun workers have
+	// isolated module scopes.
+	await initPayloadEncryption();
+
 	// Initialize components
 	const config = container.resolve<Config>(SERVICE_KEYS.Config);
 	const runtime = config.getRuntime();
@@ -694,6 +720,8 @@ export default async function startServer(options?: {
 	strategy.initialize(dbOps);
 
 	// Proxy context
+	const usageWorker = getUsageWorker();
+	sendWorkerConfigUpdate(config.getStorePayloads());
 	const proxyContext: ProxyContext = {
 		strategy,
 		dbOps,
@@ -701,7 +729,7 @@ export default async function startServer(options?: {
 		provider,
 		refreshInFlight: new Map(),
 		asyncWriter,
-		usageWorker: getUsageWorker(),
+		usageWorker,
 	};
 
 	// Register this server's refresh clearing capability
@@ -710,6 +738,40 @@ export default async function startServer(options?: {
 		// Clear refresh cache for this account in this server's context
 		proxyContext.refreshInFlight.delete(accountId);
 		log.info(`Cleared refresh cache for account ${accountId} on ${serverId}`);
+	});
+
+	// Register this server's usage polling restart capability
+	registerPollingRestarter(serverId, async (accountId: string) => {
+		const account = await dbOps.getAccount(accountId);
+		if (!account) {
+			log.warn(
+				`Cannot restart usage polling: account ${accountId} not found on ${serverId}`,
+			);
+			return false;
+		}
+		if (account.provider !== "anthropic") {
+			log.warn(
+				`Cannot restart usage polling: account ${account.name} is not an Anthropic OAuth account`,
+			);
+			return false;
+		}
+		if (!account.access_token && !account.refresh_token) {
+			log.warn(
+				`Cannot restart usage polling: account ${account.name} has no tokens`,
+			);
+			return false;
+		}
+		log.info(
+			`Restarting usage polling for account ${account.name} on ${serverId}`,
+		);
+		usageCache.stopPolling(accountId);
+		startUsagePollingWithRefresh(
+			account,
+			proxyContext,
+			0,
+			config.getUsagePollIntervalMs(),
+		);
+		return true;
 	});
 
 	// Initialize auto-refresh scheduler (now that proxyContext is available)
@@ -730,6 +792,9 @@ export default async function startServer(options?: {
 				strategy.initialize(dbOps);
 				proxyContext.strategy = strategy;
 			}
+		}
+		if (fieldName === "store_payloads") {
+			sendWorkerConfigUpdate(config.getStorePayloads());
 		}
 	});
 
@@ -1059,7 +1124,12 @@ Available endpoints:
 				// Usage data fetching should work independently of account paused status
 				// Stagger startup by 5s per account to avoid simultaneous 429s on boot
 				const startupDelayMs = index * 5000;
-				startUsagePollingWithRefresh(account, proxyContext, startupDelayMs);
+				startUsagePollingWithRefresh(
+					account,
+					proxyContext,
+					startupDelayMs,
+					config.getUsagePollIntervalMs(),
+				);
 				log.info(
 					`Started usage polling for account ${account.name}${startupDelayMs > 0 ? ` (delayed ${startupDelayMs / 1000}s)` : ""}`,
 				);
@@ -1097,7 +1167,7 @@ Available endpoints:
 					account.id,
 					apiKeyProvider,
 					account.provider,
-					90000, // Poll every 90 seconds (same as Anthropic)
+					config.getUsagePollIntervalMs(),
 					account.custom_endpoint,
 				);
 				log.info(`Started usage polling for NanoGPT account ${account.name}`);
@@ -1134,7 +1204,17 @@ Available endpoints:
 					account.id,
 					apiKeyProvider,
 					account.provider,
-					90000, // Poll every 90 seconds (same as Anthropic)
+					config.getUsagePollIntervalMs(),
+					undefined, // customEndpoint
+					(accountId) => {
+						dbOps
+							.resetAccountSession(accountId, Date.now())
+							.catch((err) =>
+								log.warn(
+									`Failed to reset session for Zai account ${accountId} on window reset: ${err}`,
+								),
+							);
+					},
 				);
 				log.info(`Started usage polling for Zai account ${account.name}`);
 			} else {
@@ -1160,7 +1240,7 @@ Available endpoints:
 					account.id,
 					apiKeyProvider,
 					account.provider,
-					90000,
+					config.getUsagePollIntervalMs(),
 				);
 				log.info(
 					`Started usage polling for Kilo Gateway account ${account.name}`,

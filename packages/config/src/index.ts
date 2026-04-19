@@ -50,6 +50,8 @@ export interface ConfigData {
 	default_agent_model?: string;
 	data_retention_days?: number;
 	request_retention_days?: number;
+	store_payloads?: boolean;
+	usage_poll_interval_ms?: number;
 	// Database configuration
 	db_wal_mode?: boolean;
 	db_busy_timeout_ms?: number;
@@ -301,6 +303,37 @@ export class Config extends EventEmitter {
 		this.set("request_retention_days", clamped);
 	}
 
+	getStorePayloads(): boolean {
+		const fromEnv = process.env.STORE_PAYLOADS;
+		if (fromEnv !== undefined) {
+			return fromEnv !== "false" && fromEnv !== "0";
+		}
+		const fromFile = this.data.store_payloads;
+		if (typeof fromFile === "boolean") return fromFile;
+		return true; // default: store payloads
+	}
+
+	setStorePayloads(value: boolean): void {
+		this.set("store_payloads", value);
+	}
+
+	getUsagePollIntervalMs(): number {
+		const fromEnv = process.env.USAGE_POLL_INTERVAL_MS;
+		if (fromEnv) {
+			const n = parseInt(fromEnv, 10);
+			if (!Number.isNaN(n)) return this.clamp(n, 10000, 3600000);
+		}
+		const fromFile = this.data.usage_poll_interval_ms;
+		if (typeof fromFile === "number")
+			return this.clamp(fromFile, 10000, 3600000);
+		return 90000; // default: 90 seconds
+	}
+
+	setUsagePollIntervalMs(ms: number): void {
+		const clamped = this.clamp(ms, 10000, 3600000);
+		this.set("usage_poll_interval_ms", clamped);
+	}
+
 	getAllSettings(): Record<string, string | number | boolean | undefined> {
 		// Include current strategy (which might come from env)
 		return {
@@ -309,6 +342,8 @@ export class Config extends EventEmitter {
 			default_agent_model: this.getDefaultAgentModel(),
 			data_retention_days: this.getDataRetentionDays(),
 			request_retention_days: this.getRequestRetentionDays(),
+			store_payloads: this.getStorePayloads(),
+			usage_poll_interval_ms: this.getUsagePollIntervalMs(),
 		};
 	}
 

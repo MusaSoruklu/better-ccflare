@@ -102,12 +102,15 @@ export interface AccountRow {
 	priority?: number;
 	auto_fallback_enabled?: boolean | number | null;
 	auto_refresh_enabled?: boolean | number | null;
+	auto_pause_on_overage_enabled?: boolean | number | null;
 	custom_endpoint?: string | null;
 	model_mappings?: string | null; // JSON string for OpenAI-compatible providers
 	cross_region_mode?: string | null; // Bedrock cross-region inference mode
 	quarantined?: boolean | number | null;
 	quarantined_at?: number | null;
 	quarantine_reason?: string | null;
+	model_fallbacks?: string | null; // JSON string for model family fallback mappings
+	billing_type?: string | null; // Per-account billing override
 }
 
 // Domain model - used throughout the application
@@ -133,12 +136,26 @@ export interface Account {
 	priority: number;
 	auto_fallback_enabled: boolean;
 	auto_refresh_enabled: boolean;
+	auto_pause_on_overage_enabled: boolean;
 	custom_endpoint: string | null;
 	model_mappings: string | null; // JSON string for OpenAI-compatible providers
 	cross_region_mode: string | null; // Bedrock cross-region inference mode
 	quarantined?: boolean;
 	quarantined_at?: number | null;
 	quarantine_reason?: string | null;
+	model_fallbacks: string | null; // JSON string for model family fallback mappings
+	billing_type: string | null;
+}
+
+// Session statistics for 5-hour token window
+export interface SessionStats {
+	requests: number;
+	inputTokens: number;
+	cacheCreationInputTokens: number;
+	cacheReadInputTokens: number;
+	outputTokens: number;
+	planCostUsd: number;
+	apiCostUsd: number;
 }
 
 // API response type - what clients receive
@@ -161,8 +178,9 @@ export interface AccountResponse {
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
+	autoPauseOnOverageEnabled?: boolean;
 	customEndpoint: string | null;
-	modelMappings: { [key: string]: string } | null; // Parsed model mappings for OpenAI-compatible providers
+	modelMappings: { [key: string]: string | string[] } | null; // Parsed model mappings (arrays = cycling models)
 	usageUtilization: number | null; // Percentage utilization (0-100) from API
 	usageWindow: string | null; // Most restrictive window (e.g., "five_hour")
 	usageData: FullUsageData | null; // Full usage data for Anthropic accounts
@@ -171,6 +189,9 @@ export interface AccountResponse {
 	quarantined?: boolean;
 	quarantinedAt?: string | null;
 	quarantineReason?: string | null;
+	modelFallbacks?: { [key: string]: string } | null;
+	billingType?: string | null;
+	sessionStats: SessionStats | null;
 }
 
 // UI display type - used in CLI and web dashboard
@@ -222,7 +243,8 @@ export interface AccountListItem {
 		| "kilo"
 		| "openrouter"
 		| "alibaba-coding-plan"
-		| "codex";
+		| "codex"
+		| "qwen";
 	priority: number;
 	autoFallbackEnabled: boolean;
 	autoRefreshEnabled: boolean;
@@ -286,6 +308,7 @@ export function toAccount(row: AccountRow): Account {
 		priority: toNum(row.priority),
 		auto_fallback_enabled: !!row.auto_fallback_enabled,
 		auto_refresh_enabled: !!row.auto_refresh_enabled,
+		auto_pause_on_overage_enabled: !!row.auto_pause_on_overage_enabled,
 		custom_endpoint: row.custom_endpoint || null,
 		model_mappings: row.model_mappings || null,
 		cross_region_mode: row.cross_region_mode || null,
@@ -293,6 +316,8 @@ export function toAccount(row: AccountRow): Account {
 		quarantined_at: toNumOrNull(row.quarantined_at),
 		quarantine_reason:
 			typeof row.quarantine_reason === "string" ? row.quarantine_reason : null,
+		model_fallbacks: row.model_fallbacks || null,
+		billing_type: row.billing_type || null,
 	};
 }
 
@@ -309,20 +334,19 @@ export function toAccountResponse(account: Account): AccountResponse {
 		? `Session: ${account.session_request_count} requests`
 		: "No active session";
 
-	// Parse model mappings for OpenAI-compatible providers
+	// Parse model mappings (supported for any provider)
 	let modelMappings: { [key: string]: string } | null = null;
-	if (account.provider === "openai-compatible" && account.model_mappings) {
+	if (account.model_mappings) {
 		try {
 			const parsed = JSON.parse(account.model_mappings);
-			modelMappings = parsed.modelMappings || null;
+			// Stored as flat {"model": "target"} object
+			modelMappings =
+				typeof parsed === "object" && parsed !== null ? parsed : null;
 		} catch {
 			// If parsing fails, ignore model mappings
 			modelMappings = null;
 		}
-	} else if (
-		account.provider === "openai-compatible" &&
-		account.custom_endpoint
-	) {
+	} else if (account.custom_endpoint) {
 		// Also try parsing from custom_endpoint for backwards compatibility
 		try {
 			const parsed = JSON.parse(account.custom_endpoint);
@@ -332,6 +356,16 @@ export function toAccountResponse(account: Account): AccountResponse {
 		} catch {
 			// If parsing fails, ignore model mappings
 			modelMappings = null;
+		}
+	}
+
+	// Parse model fallbacks for all providers
+	let modelFallbacks: { [key: string]: string } | null = null;
+	if (account.model_fallbacks) {
+		try {
+			modelFallbacks = JSON.parse(account.model_fallbacks);
+		} catch {
+			modelFallbacks = null;
 		}
 	}
 
@@ -360,6 +394,7 @@ export function toAccountResponse(account: Account): AccountResponse {
 		priority: account.priority,
 		autoFallbackEnabled: account.auto_fallback_enabled,
 		autoRefreshEnabled: account.auto_refresh_enabled,
+		autoPauseOnOverageEnabled: account.auto_pause_on_overage_enabled,
 		customEndpoint: account.custom_endpoint,
 		modelMappings,
 		usageUtilization: null, // Will be filled in by API handler from cache
@@ -371,6 +406,9 @@ export function toAccountResponse(account: Account): AccountResponse {
 			? new Date(account.quarantined_at).toISOString()
 			: null,
 		quarantineReason: account.quarantine_reason,
+		modelFallbacks,
+		billingType: account.billing_type,
+		sessionStats: null,
 	};
 }
 

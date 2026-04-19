@@ -10,6 +10,7 @@ import {
 	AccountModelMappingsDialog,
 	AccountPriorityDialog,
 	DeleteConfirmationDialog,
+	QwenReauthDialog,
 	RenameAccountDialog,
 } from "./accounts";
 import { Button } from "./ui/button";
@@ -69,6 +70,13 @@ export function AccountsTab() {
 		isOpen: false,
 		account: null,
 	});
+	const [qwenReauthDialog, setQwenReauthDialog] = useState<{
+		isOpen: boolean;
+		account: Account | null;
+	}>({
+		isOpen: false,
+		account: null,
+	});
 	const [actionError, setActionError] = useState<string | null>(null);
 
 	const handleAddAccount = async (params: {
@@ -86,7 +94,8 @@ export function AccountsTab() {
 			| "kilo"
 			| "openrouter"
 			| "alibaba-coding-plan"
-			| "codex";
+			| "codex"
+			| "qwen";
 		priority: number;
 		customEndpoint?: string;
 	}) => {
@@ -357,6 +366,18 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleRefreshUsage = async (account: Account) => {
+		try {
+			await api.refreshUsage(account.id);
+			// Wait briefly then reload so fresh usage data has time to arrive
+			await new Promise((resolve) => setTimeout(resolve, 5000));
+			await loadAccounts();
+			setActionError(null);
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handlePriorityChange = (account: Account) => {
 		setPriorityDialog({ isOpen: true, account });
 	};
@@ -395,12 +416,40 @@ export function AccountsTab() {
 		}
 	};
 
+	const handleBillingTypeToggle = async (account: Account) => {
+		try {
+			await api.updateAccountBillingType(
+				account.id,
+				account.billingType === "plan" ? "api" : "plan",
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
+	const handleAutoPauseOnOverageToggle = async (account: Account) => {
+		try {
+			await api.updateAccountAutoPauseOnOverage(
+				account.id,
+				!account.autoPauseOnOverageEnabled,
+			);
+			await loadAccounts();
+		} catch (err) {
+			setActionError(formatError(err));
+		}
+	};
+
 	const handleCustomEndpointChange = (account: Account) => {
 		setCustomEndpointDialog({ isOpen: true, account });
 	};
 
 	const handleModelMappingsChange = (account: Account) => {
 		setModelMappingsDialog({ isOpen: true, account });
+	};
+
+	const handleReauth = (account: Account) => {
+		setQwenReauthDialog({ isOpen: true, account });
 	};
 
 	const handleUpdateCustomEndpoint = async (
@@ -418,7 +467,7 @@ export function AccountsTab() {
 
 	const handleUpdateModelMappings = async (
 		accountId: string,
-		modelMappings: { [key: string]: string },
+		modelMappings: { [key: string]: string | string[] },
 	) => {
 		try {
 			await api.updateAccountModelMappings(accountId, modelMappings);
@@ -501,13 +550,17 @@ export function AccountsTab() {
 						accounts={accounts}
 						onPauseToggle={handlePauseToggle}
 						onForceResetRateLimit={handleForceResetRateLimit}
+						onRefreshUsage={handleRefreshUsage}
 						onRemove={handleRemoveAccount}
 						onRename={handleRename}
 						onPriorityChange={handlePriorityChange}
 						onAutoFallbackToggle={handleAutoFallbackToggle}
 						onAutoRefreshToggle={handleAutoRefreshToggle}
+						onBillingTypeToggle={handleBillingTypeToggle}
+						onAutoPauseOnOverageToggle={handleAutoPauseOnOverageToggle}
 						onCustomEndpointChange={handleCustomEndpointChange}
 						onModelMappingsChange={handleModelMappingsChange}
+						onReauth={handleReauth}
 					/>
 				</CardContent>
 			</Card>
@@ -584,6 +637,15 @@ export function AccountsTab() {
 					onUpdateModelMappings={handleUpdateModelMappings}
 				/>
 			)}
+			<QwenReauthDialog
+				isOpen={qwenReauthDialog.isOpen}
+				account={qwenReauthDialog.account}
+				onClose={() => setQwenReauthDialog({ isOpen: false, account: null })}
+				onSuccess={() => {
+					loadAccounts();
+					setQwenReauthDialog({ isOpen: false, account: null });
+				}}
+			/>
 		</div>
 	);
 }

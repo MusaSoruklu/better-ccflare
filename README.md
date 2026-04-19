@@ -5,9 +5,6 @@
 
 The ultimate Claude API proxy with intelligent load balancing across multiple accounts. Full visibility into every request, response, and rate limit.
 
-**🚨 Major Update (v3.0.0):** This release includes critical security fixes, OAuth token health monitoring, and new provider support (NanoGPT, Minimax). All users should upgrade immediately. See [migration guide](docs/migration-v2-to-v3.md) for details.
-
-
 https://github.com/user-attachments/assets/c859872f-ca5e-4f8b-b6a0-7cc7461fe62a
 
 
@@ -187,7 +184,29 @@ SESSION_DURATION_MS=18000000           # Session duration in milliseconds (5 hou
 RETRY_ATTEMPTS=3                       # Number of retry attempts
 RETRY_DELAY_MS=1000                   # Initial retry delay in milliseconds
 RETRY_BACKOFF=2                        # Retry backoff multiplier
+
+# Storage
+STORE_PAYLOADS=false                   # Disable storing request/response bodies (reduces DB size and memory usage)
+                                       # Token counts, costs, model, status and timing are still recorded
+
+# Streaming Timeouts
+# Agentic workloads (e.g. recursive claude-code-sdk sessions) can leave the outer
+# stream silent for minutes while sub-calls run. Increase these if long-running
+# nested calls appear failed or missing in the UI (issue #84).
+CF_STREAM_TOTAL_TIMEOUT_MS=1800000     # Max total stream duration per request (default: 30 minutes)
+CF_STREAM_CHUNK_TIMEOUT_MS=300000      # Max silence between consecutive chunks (default: 5 minutes)
+
+# Payload encryption at rest (optional)
+# When set, request/response payloads are encrypted with AES-256-GCM before
+# being written to `request_payloads`. Existing plaintext rows remain readable.
+# Generate with: openssl rand -hex 32
+PAYLOAD_ENCRYPTION_KEY=                # 64-character hex (32 bytes / AES-256). Unset = plaintext storage.
 ```
+
+**Encryption notes**:
+- Without a key, payloads are stored as plaintext (no behavior change from prior versions).
+- Losing the key makes encrypted rows unreadable — payload reads throw rather than silently returning garbage. Back the key up alongside the database.
+- The key is read once at process start (and once per Bun worker). Rotating it requires a re-encrypt migration; not yet built.
 
 **Security Notes**:
 - Use `BETTER_CCFLARE_HOST=127.0.0.1` to bind only to localhost for better security
@@ -229,6 +248,9 @@ LOG_FORMAT=pretty
 # Database configuration
 DATA_RETENTION_DAYS=7
 REQUEST_RETENTION_DAYS=365
+
+# Storage (set to false to skip storing request/response bodies, reducing DB size and memory pressure)
+STORE_PAYLOADS=true
 ```
 
 **Usage with different deployment methods**:
@@ -268,11 +290,9 @@ docker run -d \
 
 # View logs
 docker logs -f better-ccflare
-
-# Manage accounts
-docker exec -it better-ccflare better-ccflare --add-account myaccount --mode claude-oauth --priority 0
-docker exec -it better-ccflare better-ccflare --list
 ```
+
+Once the container is running, **open http://localhost:8080 in your browser** to add and manage accounts through the Web UI. This is the recommended way — using `docker exec` to run CLI commands inside the container won't work for OAuth-based account modes since the container has no browser.
 
 **🆕 Environment Variable Support**: Docker Compose now automatically loads `.env` files from the same directory as `docker-compose.yml`. Simply create a `.env` file alongside your `docker-compose.yml` file and the container will use those settings.
 
@@ -283,6 +303,10 @@ docker exec -it better-ccflare better-ccflare --list
 - `sha-abc123` - Commit-specific tags
 
 See [DOCKER.md](DOCKER.md) for detailed Docker documentation.
+
+### Systemd Deployment
+
+For running better-ccflare as a native systemd service on Linux (without Docker), see the [Systemd Deployment Guide](docs/systemd.md). It covers unit file configuration, memory management with `--smol`, restart policies, and a preflight script that prevents `BUN_JSC_*` environment variable crashes.
 
 ## Configure Claude SDK
 
@@ -613,6 +637,14 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 - **Auto-refresh** - Automatically start new usage windows when they reset
 - **Usage Window Alignment** - Sessions automatically align with Claude OAuth usage window resets for optimal resource utilization
 
+### 🔗 Combos — Cross-Provider Fallback Chains
+- **Named Combos** - Create named fallback chains with ordered (account, model) slots
+- **Family Activation** - Assign one combo per model family (Opus, Sonnet, Haiku) — independent activation toggles
+- **Auto Waterfall** - Requests automatically fall through slots top-to-bottom, skipping unavailable accounts (rate-limited, paused)
+- **Per-Slot Model Override** - Each slot can use a different model, enabling cross-model fallback (e.g., try Opus on provider A, then Sonnet on provider B)
+- **SessionStrategy Fallback** - If all combo slots fail, automatically falls back to normal session-based routing
+- **Dashboard Management** - Drag-and-drop slot builder with account provider badges, enable/disable per combo, and family assignment UI
+
 ### 📈 Real-Time Analytics
 - Token usage tracking per request with optimized batch processing
 - Response time monitoring with intelligent caching
@@ -650,6 +682,7 @@ We recommend using one of the workarounds above until the npm bug is fixed.
 - **Universal API Format** - Use OpenAI-compatible providers with Claude API format
 - **Automatic Format Conversion** - Seamless conversion between Anthropic and OpenAI request/response formats
 - **Model Mapping** - Map Claude models (Opus, Sonnet, Haiku) to equivalent OpenAI models
+- **Model Fallbacks** - Automatically retry with a fallback model when the requested model is unavailable (e.g., fallback from Opus to Sonnet on Pro subscriptions)
 - **Streaming Support** - Full support for streaming responses from OpenAI-compatible providers
 - **API Key Authentication** - Secure API key management for OpenAI-compatible providers
 - **Cost Tracking** - Automatic cost calculation for usage monitoring and budgeting
@@ -677,6 +710,7 @@ Full documentation available in [`docs/`](docs/):
 - [Auto-Fallback Guide](docs/auto-fallback.md)
 - [Auto-Refresh Guide](docs/auto-refresh.md)
 - [OpenAI-Compatible Providers](docs/providers.md)
+- [Combos — Fallback Chains](docs/combos.md)
 
 ## Screenshots
 
@@ -735,7 +769,7 @@ Inspired by [snipeship/ccflare](https://github.com/snipeship/ccflare) - thanks f
 - [@bitcoin4cashqc](https://github.com/bitcoin4cashqc) - SSL/HTTPS support implementation with comprehensive documentation
 - [@anonym-uz](https://github.com/anonym-uz) - Critical auto-pause bug fix, analytics performance optimizations, request body truncation, and incremental vacuum implementation
 - [@makhweeb](https://github.com/makhweeb) - Enhanced request handling and analytics improvements
-- [@jw409](https://github.com/jw409) - Fixed OAuth account addition in WSL2 and compiled binaries by replacing unreliable prompt() with readline
+- [@jw409](https://github.com/jw409) - Fixed OAuth account addition in WSL2 and compiled binaries by replacing unreliable prompt() with readline; systemd deployment guide, BUN_JSC_* crash loop analysis, and preflight environment validator (PR #106)
 - [@materemias](https://github.com/materemias) - Testing and validation of Vertex AI provider implementation, thorough debugging of OAuth API key authentication (issue #54), requesting and validating AWS Bedrock support (issue #49), and extensive testing of new releases and features
 - [@tqtensor](https://github.com/tqtensor) - Comprehensive memory leak fix preventing OOM kills with smart chunk capping, memory monitoring, and optimized cleanup (PR #67)
 - [@lunetics](https://github.com/lunetics) - Force-reset rate limit feature allowing manual clearing of stale rate-limit locks via API, CLI, and dashboard with immediate usage polling (PR #68), OOM kill prevention with periodic data retention cleanup, 3-day default retention, and time-scoped stats queries (PR #70), model registry sync removing retired models and adding sonnet-4.6 CLI shortcut (PR #71)

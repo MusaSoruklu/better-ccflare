@@ -4,9 +4,11 @@ import {
 	trackClientVersion,
 } from "@better-ccflare/core";
 import { Logger } from "@better-ccflare/logger";
+import type { Account } from "@better-ccflare/types";
 import {
 	createRequestMetadata,
 	ERROR_MESSAGES,
+	getComboSlotInfo,
 	interceptAndModifyRequest,
 	isRefreshTokenLikelyExpired,
 	type ProxyContext,
@@ -17,7 +19,11 @@ import {
 	validateProviderPath,
 } from "./handlers";
 import { EMBEDDED_WORKER_CODE } from "./inline-worker";
-import type { ControlMessage, OutgoingWorkerMessage } from "./worker-messages";
+import type {
+	ConfigUpdateMessage,
+	ControlMessage,
+	OutgoingWorkerMessage,
+} from "./worker-messages";
 
 export type { ProxyContext } from "./handlers";
 
@@ -105,6 +111,19 @@ export function getUsageWorker(): Worker {
 }
 
 /**
+ * Sends a config update to the usage worker
+ */
+export function sendWorkerConfigUpdate(storePayloads: boolean): void {
+	if (!usageWorkerInstance) return;
+	const msg: ConfigUpdateMessage = { type: "config-update", storePayloads };
+	try {
+		usageWorkerInstance.postMessage(msg);
+	} catch (_error) {
+		// Worker not ready yet, ignore
+	}
+}
+
+/**
  * Gracefully terminates the usage worker
  */
 export function terminateUsageWorker(): void {
@@ -189,19 +208,33 @@ export async function handleProxy(
 	// 3. Prepare request body
 	const { buffer: requestBodyBuffer } = await prepareRequestBody(req);
 
-	// 3a. Validate request body for /v1/messages endpoint
-	if (url.pathname === "/v1/messages" && requestBodyBuffer) {
+	// Extract model from request body for family detection (used by combo routing)
+	// and reuse parsed body for /v1/messages validation (consolidate parses)
+	let requestModel: string | null = null;
+	let parsedBody: Record<string, unknown> | null = null;
+	if (requestBodyBuffer) {
 		try {
 			const bodyText = new TextDecoder().decode(requestBodyBuffer);
-			const bodyJson = JSON.parse(bodyText);
+			parsedBody = JSON.parse(bodyText);
+			requestModel =
+				((parsedBody as Record<string, unknown>).model as string) ?? null;
+		} catch {
+			// If body can't be parsed, model stays null — combo routing won't activate
+		}
+	}
 
+	// 3a. Validate request body for /v1/messages endpoint
+	if (url.pathname === "/v1/messages" && requestBodyBuffer) {
+		if (parsedBody) {
 			// Reject requests without messages field (e.g., Claude Code internal events)
-			if (!bodyJson.messages || !Array.isArray(bodyJson.messages)) {
+			if (!parsedBody.messages || !Array.isArray(parsedBody.messages)) {
 				log.warn(
 					`Rejected invalid request to /v1/messages without messages field`,
 					{
-						event_type: bodyJson.event_type,
-						event_name: bodyJson.event_data?.event_name,
+						event_type: parsedBody.event_type,
+						event_name: (
+							parsedBody.event_data as Record<string, unknown> | undefined
+						)?.event_name,
 					},
 				);
 				return new Response(
@@ -219,9 +252,9 @@ export async function handleProxy(
 					},
 				);
 			}
-		} catch (error) {
+		} else {
 			// If we can't parse the body, let it through and let the provider handle it
-			log.debug("Could not parse request body for validation", error);
+			log.debug("Could not parse request body for validation");
 		}
 	}
 
@@ -247,7 +280,11 @@ export async function handleProxy(
 	requestMeta.agentUsed = agentUsed;
 
 	// 6. Select accounts
-	const accounts = await selectAccountsForRequest(requestMeta, ctx);
+	const accounts = await selectAccountsForRequest(
+		requestMeta,
+		ctx,
+		requestModel ?? undefined,
+	);
 
 	// 7. Handle no accounts case
 	if (accounts.length === 0) {
@@ -275,8 +312,28 @@ export async function handleProxy(
 	}
 
 	// 9. Try each account
+	const comboInfo = getComboSlotInfo(requestMeta);
+	let response: Response | null = null;
+
 	for (let i = 0; i < accounts.length; i++) {
-		const response = await proxyWithAccount(
+		// For combo routing: enrich metadata with slot index and look up model override
+		let modelOverride: string | null = null;
+		if (comboInfo?.slots[i]) {
+			const slot = comboInfo.slots[i];
+			if (slot.accountId !== accounts[i].id) {
+				log.error(
+					`Combo slot/account desync: slot ${i} expects account ${slot.accountId} but got ${accounts[i].id}`,
+				);
+			} else {
+				modelOverride = slot.modelOverride;
+			}
+			requestMeta.comboSlotIndex = i;
+			log.info(
+				`Attempting combo slot ${i}/${accounts.length - 1} on account ${accounts[i].name} with model "${modelOverride}"`,
+			);
+		}
+
+		response = await proxyWithAccount(
 			req,
 			url,
 			accounts[i],
@@ -286,6 +343,7 @@ export async function handleProxy(
 			i,
 			i === accounts.length - 1,
 			ctx,
+			modelOverride,
 			apiKeyId,
 			apiKeyName,
 		);
@@ -293,10 +351,59 @@ export async function handleProxy(
 		if (response) {
 			return response;
 		}
+
+		// Log combo slot failure
+		if (comboInfo) {
+			log.info(
+				`Combo slot ${i} failed on account ${accounts[i].name}${i < accounts.length - 1 ? ", trying next slot" : ", all combo slots exhausted"}`,
+			);
+		}
 	}
 
-	// 10. All accounts failed - check if OAuth token issues are the cause
-	const oauthAccounts = accounts.filter((acc) => acc.refresh_token);
+	// 10. Combo fallback: if combo routing was active and all slots failed,
+	//     fall back to normal SessionStrategy routing (REQ-14)
+	let fallbackAccounts: Account[] | null = null;
+	if (comboInfo?.comboName) {
+		log.warn(
+			`All combo slots failed for combo "${comboInfo.comboName}", falling back to SessionStrategy routing`,
+		);
+		// Clear combo info and retry with normal routing
+		requestMeta.comboName = null;
+		requestMeta.comboSlotIndex = null;
+		fallbackAccounts = await selectAccountsForRequest(requestMeta, ctx);
+
+		if (fallbackAccounts.length > 0) {
+			log.info(
+				`Fallback: trying ${fallbackAccounts.length} SessionStrategy accounts`,
+			);
+			for (let i = 0; i < fallbackAccounts.length; i++) {
+				response = await proxyWithAccount(
+					req,
+					url,
+					fallbackAccounts[i],
+					requestMeta,
+					finalBodyBuffer,
+					finalCreateBodyStream,
+					i,
+					i === fallbackAccounts.length - 1,
+					ctx,
+					undefined, // No model override for fallback path
+					apiKeyId,
+					apiKeyName,
+				);
+
+				if (response) {
+					return response;
+				}
+			}
+		}
+	}
+
+	// 11. All accounts failed - check if OAuth token issues are the cause
+	const allAttemptedAccounts = comboInfo
+		? [...accounts, ...(fallbackAccounts ?? [])]
+		: accounts;
+	const oauthAccounts = allAttemptedAccounts.filter((acc) => acc.refresh_token);
 	const needsReauth = oauthAccounts.filter((acc) =>
 		isRefreshTokenLikelyExpired(acc),
 	);
@@ -316,7 +423,7 @@ export async function handleProxy(
 	}
 
 	throw new ServiceUnavailableError(
-		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${accounts.length} attempted)`,
+		`${ERROR_MESSAGES.ALL_ACCOUNTS_FAILED} (${allAttemptedAccounts.length} attempted)`,
 		ctx.provider.name,
 	);
 }

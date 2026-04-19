@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Config } from "@better-ccflare/config";
 import type { ModelMapping } from "@better-ccflare/core";
 import {
+	validateAndSanitizeModelFallbacks,
 	validateAndSanitizeModelMappings,
 	validateApiKey,
 	validateEndpointUrl,
@@ -17,6 +18,10 @@ import {
 	getOAuthProvider,
 	type TokenRefreshResult as TokenResult,
 } from "@better-ccflare/providers";
+import {
+	initiateDeviceFlow as initiateQwenDeviceFlow,
+	pollForToken as pollQwenForToken,
+} from "@better-ccflare/providers/qwen";
 import type { AccountListItem } from "@better-ccflare/types";
 import {
 	type PromptAdapter,
@@ -41,10 +46,13 @@ export interface AddAccountOptionsWithAdapter {
 		| "kilo"
 		| "openrouter"
 		| "alibaba-coding-plan"
-		| "codex";
+		| "codex"
+		| "qwen";
 	priority?: number;
 	customEndpoint?: string;
-	modelMappings?: { [key: string]: string };
+	modelMappings?: { [key: string]: string | string[] };
+	/** @deprecated Use comma-separated values in modelMappings instead */
+	modelFallbacks?: { [key: string]: string };
 	profile?: string;
 	crossRegionMode?: "geographic" | "global" | "regional";
 	adapter?: PromptAdapter;
@@ -68,7 +76,8 @@ export interface AccountListItemWithMode extends AccountListItem {
 		| "kilo"
 		| "openrouter"
 		| "alibaba-coding-plan"
-		| "codex";
+		| "codex"
+		| "qwen";
 }
 
 /**
@@ -150,7 +159,8 @@ export async function createNanoGPTAccount(
 	apiKey: string,
 	priority: number,
 	customEndpoint?: string,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -168,11 +178,17 @@ export async function createNanoGPTAccount(
 		const validatedMappings = validateAndSanitizeModelMappings(modelMappings);
 		validatedModelMappings = JSON.stringify(validatedMappings);
 	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -187,6 +203,7 @@ export async function createNanoGPTAccount(
 			validatedPriority,
 			validatedEndpoint,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -199,7 +216,8 @@ async function createKiloAccount(
 	name: string,
 	apiKey: string,
 	priority: number,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -210,11 +228,17 @@ async function createKiloAccount(
 		const validated = validateAndSanitizeModelMappings(modelMappings);
 		validatedModelMappings = JSON.stringify(validated);
 	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -229,6 +253,7 @@ async function createKiloAccount(
 			validatedPriority,
 			null,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -241,7 +266,8 @@ async function createAlibabaCodingPlanAccount(
 	name: string,
 	apiKey: string,
 	priority: number,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -252,11 +278,17 @@ async function createAlibabaCodingPlanAccount(
 		const validated = validateAndSanitizeModelMappings(modelMappings);
 		validatedModelMappings = JSON.stringify(validated);
 	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -271,6 +303,7 @@ async function createAlibabaCodingPlanAccount(
 			validatedPriority,
 			null,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -283,7 +316,8 @@ async function createOpenRouterAccount(
 	name: string,
 	apiKey: string,
 	priority: number,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -294,11 +328,17 @@ async function createOpenRouterAccount(
 		const validatedMappings = validateAndSanitizeModelMappings(modelMappings);
 		validatedModelMappings = JSON.stringify(validatedMappings);
 	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -313,6 +353,7 @@ async function createOpenRouterAccount(
 			validatedPriority,
 			null,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -326,7 +367,8 @@ async function createAnthropicCompatibleAccount(
 	apiKey: string,
 	priority: number,
 	customEndpoint?: string,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -351,11 +393,18 @@ async function createAnthropicCompatibleAccount(
 		validatedModelMappings = JSON.stringify(validatedMappings);
 	}
 
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 0, 0, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -365,6 +414,7 @@ async function createAnthropicCompatibleAccount(
 			validatedPriority,
 			validatedEndpoint,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 }
@@ -377,7 +427,8 @@ async function createZaiAccount(
 	name: string,
 	apiKey: string,
 	priority: number,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -390,12 +441,18 @@ async function createZaiAccount(
 		const validated = validateAndSanitizeModelMappings(modelMappings);
 		validatedModelMappings = JSON.stringify(validated);
 	}
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
 
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -407,6 +464,7 @@ async function createZaiAccount(
 			validatedPriority,
 			null,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 
@@ -554,7 +612,21 @@ async function createVertexAIAccount(
 }
 
 /**
- * Prompt user for model mappings
+ * Parse a comma-separated model string into a string or string[].
+ * Trims whitespace around each value and filters empty entries.
+ */
+function parseModelInput(value: string): string | string[] | null {
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	const parts = trimmed
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	return parts.length === 1 ? parts[0] : parts;
+}
+
+/**
+ * Prompt user for model mappings. Supports comma-separated models for cycling.
  */
 async function promptModelMappings(
 	adapter: PromptAdapter,
@@ -583,7 +655,7 @@ async function promptModelMappings(
 	}
 
 	console.log(
-		"\nEnter model mappings (press Enter with empty value to finish):",
+		"\nEnter model mappings (comma-separated for multiple models to cycle through):",
 	);
 	const mappings: ModelMapping = {};
 
@@ -591,25 +663,22 @@ async function promptModelMappings(
 	const opusModel = await adapter.input(
 		`Opus model (default: ${defaults.opus}): `,
 	);
-	if (opusModel.trim()) {
-		mappings.opus = opusModel.trim();
-	}
+	const opus = parseModelInput(opusModel);
+	if (opus) mappings.opus = opus;
 
 	// Get sonnet mapping
 	const sonnetModel = await adapter.input(
 		`Sonnet model (default: ${defaults.sonnet}): `,
 	);
-	if (sonnetModel.trim()) {
-		mappings.sonnet = sonnetModel.trim();
-	}
+	const sonnet = parseModelInput(sonnetModel);
+	if (sonnet) mappings.sonnet = sonnet;
 
 	// Get haiku mapping
 	const haikuModel = await adapter.input(
 		`Haiku model (default: ${defaults.haiku}): `,
 	);
-	if (haikuModel.trim()) {
-		mappings.haiku = haikuModel.trim();
-	}
+	const haiku = parseModelInput(haikuModel);
+	if (haiku) mappings.haiku = haiku;
 
 	return Object.keys(mappings).length > 0 ? mappings : null;
 }
@@ -624,6 +693,7 @@ async function createOpenAIAccount(
 	endpoint: string,
 	priority: number,
 	modelMappings: ModelMapping | null,
+	modelFallbacks?: ModelMapping | null,
 ): Promise<void> {
 	const accountId = crypto.randomUUID();
 	const now = Date.now();
@@ -642,11 +712,18 @@ async function createOpenAIAccount(
 		? JSON.stringify(validatedModelMappings)
 		: null;
 
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -658,6 +735,7 @@ async function createOpenAIAccount(
 			validatedPriority,
 			validatedEndpoint,
 			modelMappingsJson,
+			validatedModelFallbacks,
 		],
 	);
 
@@ -685,7 +763,8 @@ async function createCodexOAuthAccount(
 	name: string,
 	priority: number,
 	customEndpoint?: string,
-	modelMappings?: { [key: string]: string } | null,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
 ): Promise<void> {
 	// Get the CodexOAuthProvider
 	const oauthProvider = getOAuthProvider("codex");
@@ -784,11 +863,18 @@ async function createCodexOAuthAccount(
 		validatedModelMappings = JSON.stringify(validated);
 	}
 
+	// Validate model fallbacks
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
 	await dbOps.getAdapter().run(
 		`INSERT INTO accounts (
 			id, name, provider, api_key, refresh_token, access_token,
-			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
+			expires_at, created_at, request_count, total_requests, priority, custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
 		[
 			accountId,
 			name,
@@ -801,11 +887,123 @@ async function createCodexOAuthAccount(
 			validatedPriority,
 			validatedEndpoint,
 			validatedModelMappings,
+			validatedModelFallbacks,
 		],
 	);
 
 	console.log(`\nAccount '${name}' added successfully!`);
 	console.log("Type: Codex (OpenAI OAuth)");
+}
+
+async function createQwenOAuthAccount(
+	dbOps: DatabaseOperations,
+	name: string,
+	priority: number,
+	modelMappings?: { [key: string]: string | string[] } | null,
+	modelFallbacks?: { [key: string]: string | string[] } | null,
+): Promise<void> {
+	console.log("\nQwen uses OAuth device code authentication.");
+	console.log("You will be given a URL and a code to enter in your browser.\n");
+
+	console.log("Initiating device flow...");
+	const deviceFlow = await initiateQwenDeviceFlow();
+
+	console.log(`\n  Verification URL: ${deviceFlow.verificationUri}`);
+	console.log(`  User code:        ${deviceFlow.userCode}`);
+	if (deviceFlow.verificationUriComplete) {
+		console.log(`\n  Quick link: ${deviceFlow.verificationUriComplete}`);
+	}
+
+	console.log(
+		"\nOpen the URL above in your browser and enter the user code to authorize.",
+	);
+
+	const browserOpened = await openBrowser(
+		deviceFlow.verificationUriComplete || deviceFlow.verificationUri,
+	);
+	if (!browserOpened) {
+		console.log(
+			"\nFailed to open browser automatically. Please manually open the URL above.",
+		);
+	}
+
+	console.log("\nWaiting for authorization...");
+
+	const tokens = await pollQwenForToken(
+		deviceFlow.deviceCode,
+		deviceFlow.pkce,
+		deviceFlow.interval,
+		60,
+		(attempt: number) => {
+			if (attempt % 6 === 0) {
+				process.stdout.write(".");
+			}
+		},
+	);
+	console.log("\n"); // newline after progress dots
+
+	console.log("Authorization successful! Saving account...");
+
+	const accountId = crypto.randomUUID();
+	const now = Date.now();
+	const validatedPriority = validatePriority(priority, "priority");
+
+	let validatedModelMappings: string | null = null;
+	if (modelMappings && Object.keys(modelMappings).length > 0) {
+		const validated = validateAndSanitizeModelMappings(modelMappings);
+		validatedModelMappings = JSON.stringify(validated);
+	}
+
+	let validatedModelFallbacks = null;
+	if (modelFallbacks && Object.keys(modelFallbacks).length > 0) {
+		const validated = validateAndSanitizeModelFallbacks(modelFallbacks);
+		validatedModelFallbacks = validated ? JSON.stringify(validated) : null;
+	}
+
+	// Store resource_url as custom_endpoint
+	const resourceUrl = tokens.resource_url
+		? normalizeQwenBaseUrl(tokens.resource_url)
+		: null;
+
+	await dbOps.getAdapter().run(
+		`INSERT INTO accounts (
+			id, name, provider, api_key, refresh_token, access_token,
+			expires_at, created_at, request_count, total_requests, priority,
+			custom_endpoint, model_mappings, model_fallbacks
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+		[
+			accountId,
+			name,
+			"qwen",
+			null,
+			tokens.refresh_token,
+			tokens.access_token,
+			now + tokens.expires_in * 1000,
+			now,
+			validatedPriority,
+			resourceUrl,
+			validatedModelMappings,
+			validatedModelFallbacks,
+		],
+	);
+
+	console.log(`\nAccount '${name}' added successfully!`);
+	console.log("Type: Qwen (OAuth device code)");
+}
+
+/**
+ * Normalize Qwen resource_url to ensure it has https:// prefix and /v1 suffix.
+ * Verified against qwen-code: packages/core/src/qwen/qwenContentGenerator.ts
+ */
+function normalizeQwenBaseUrl(url: string): string {
+	let normalized = url.trim();
+	if (!normalized.startsWith("http")) {
+		normalized = `https://${normalized}`;
+	}
+	if (!normalized.endsWith("/v1")) {
+		normalized = `${normalized}/v1`;
+	}
+	return normalized;
 }
 
 /**
@@ -835,6 +1033,7 @@ export async function addAccount(
 			{ label: "Claude CLI OAuth account", value: "claude-oauth" },
 			{ label: "Claude API account", value: "console" },
 			{ label: "Codex (OpenAI OAuth)", value: "codex" },
+			{ label: "Qwen (Alibaba Cloud OAuth)", value: "qwen" },
 			{ label: "Vertex AI (Google Cloud)", value: "vertex-ai" },
 			{ label: "AWS Bedrock (AWS profile credentials)", value: "bedrock" },
 			{ label: "z.ai account (API key)", value: "zai" },
@@ -1075,6 +1274,7 @@ export async function addAccount(
 			adapter,
 			modelMappings,
 		);
+
 		await createNanoGPTAccount(
 			dbOps,
 			name,
@@ -1101,6 +1301,7 @@ export async function addAccount(
 			adapter,
 			modelMappings,
 		);
+
 		await createKiloAccount(
 			dbOps,
 			name,
@@ -1127,6 +1328,7 @@ export async function addAccount(
 			adapter,
 			modelMappings,
 		);
+
 		await createOpenRouterAccount(
 			dbOps,
 			name,
@@ -1155,6 +1357,7 @@ export async function addAccount(
 			adapter,
 			modelMappings,
 		);
+
 		await createAlibabaCodingPlanAccount(
 			dbOps,
 			name,
@@ -1180,7 +1383,11 @@ export async function addAccount(
 		const finalModelMappings = await promptModelMappings(
 			adapter,
 			modelMappings,
-			{ opus: "gpt-5.3-codex", sonnet: "gpt-5.3-codex", haiku: "gpt-5.1-codex-mini" },
+			{
+				opus: "gpt-5.3-codex",
+				sonnet: "gpt-5.3-codex",
+				haiku: "gpt-5.1-codex-mini",
+			},
 		);
 
 		await createCodexOAuthAccount(
@@ -1190,6 +1397,34 @@ export async function addAccount(
 				? priority
 				: parseInt(String(priority), 10) || 0,
 			customEndpoint,
+			finalModelMappings,
+		);
+	} else if (mode === "qwen") {
+		// Handle Qwen accounts via OAuth device code flow
+		const priority =
+			providedPriority ??
+			Number(
+				(await adapter.input(
+					"\nEnter priority (0 = highest, lower number = higher priority, default 0): ",
+				)) || 0,
+			);
+
+		const finalModelMappings = await promptModelMappings(
+			adapter,
+			modelMappings,
+			{
+				opus: "coder-model",
+				sonnet: "coder-model",
+				haiku: "coder-model",
+			},
+		);
+
+		await createQwenOAuthAccount(
+			dbOps,
+			name,
+			typeof priority === "number"
+				? priority
+				: parseInt(String(priority), 10) || 0,
 			finalModelMappings,
 		);
 	} else if (mode === "anthropic-compatible") {
@@ -1610,6 +1845,133 @@ async function notifyServersToForceResetRateLimit(
 }
 
 /**
+ * Re-authenticate a Qwen account via device code flow (preserves all metadata)
+ */
+async function reauthenticateQwenAccount(
+	dbOps: DatabaseOperations,
+	account: {
+		id: string;
+		provider: string;
+		priority: number;
+		custom_endpoint: string | null;
+		api_key: string | null;
+	},
+	name: string,
+): Promise<{ success: boolean; message: string }> {
+	const db = dbOps.getAdapter();
+
+	console.log(`\nRe-authenticating Qwen account '${name}'...`);
+	console.log(
+		"This will preserve all your account metadata (usage stats, priority, etc.)",
+	);
+	console.log("\nQwen uses OAuth device code authentication.");
+	console.log("You will be given a URL and a code to enter in your browser.\n");
+
+	console.log("Initiating device flow...");
+	const deviceFlow = await initiateQwenDeviceFlow();
+
+	console.log(`\n  Verification URL: ${deviceFlow.verificationUri}`);
+	console.log(`  User code:        ${deviceFlow.userCode}`);
+	if (deviceFlow.verificationUriComplete) {
+		console.log(`\n  Quick link: ${deviceFlow.verificationUriComplete}`);
+	}
+
+	console.log(
+		"\nOpen the URL above in your browser and enter the user code to authorize.",
+	);
+
+	const browserOpened = await openBrowser(
+		deviceFlow.verificationUriComplete || deviceFlow.verificationUri,
+	);
+	if (!browserOpened) {
+		console.log(
+			"\nFailed to open browser automatically. Please manually open the URL above.",
+		);
+	}
+
+	console.log("\nWaiting for authorization...");
+
+	let tokens: Awaited<ReturnType<typeof pollQwenForToken>>;
+	try {
+		tokens = await pollQwenForToken(
+			deviceFlow.deviceCode,
+			deviceFlow.pkce,
+			deviceFlow.interval,
+			60,
+			(attempt: number) => {
+				if (attempt % 6 === 0) {
+					process.stdout.write(".");
+				}
+			},
+		);
+	} catch (error) {
+		return {
+			success: false,
+			message: `Qwen authorization failed: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+	console.log("\n");
+
+	const resourceUrl = tokens.resource_url
+		? normalizeQwenBaseUrl(tokens.resource_url)
+		: account.custom_endpoint;
+
+	try {
+		await db.run(
+			`UPDATE accounts SET
+				refresh_token = ?,
+				access_token = ?,
+				expires_at = ?,
+				custom_endpoint = ?
+			WHERE id = ?`,
+			[
+				tokens.refresh_token,
+				tokens.access_token,
+				Date.now() + tokens.expires_in * 1000,
+				resourceUrl,
+				account.id,
+			],
+		);
+	} catch (dbError) {
+		return {
+			success: false,
+			message: `Database error while updating tokens: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
+		};
+	}
+
+	console.log(`\nAccount '${name}' re-authenticated successfully!`);
+	console.log(
+		"All account metadata (usage stats, priority, settings) has been preserved.",
+	);
+	console.log("OAuth tokens have been updated.");
+
+	// Notify running servers to reload tokens (best-effort)
+	console.log("\nNotifying running servers to reload tokens...");
+	for (const port of [8080, 8081]) {
+		try {
+			const response = await fetch(
+				`http://localhost:${port}/api/accounts/${account.id}/reload`,
+				{ method: "POST", headers: { "Content-Type": "application/json" } },
+			);
+			if (response.ok) {
+				console.log(`✓ Token reload successful on port ${port}`);
+			} else {
+				console.log(
+					`✗ Server not responding on port ${port} (${response.status})`,
+				);
+			}
+		} catch {
+			console.log(`✗ No server running on port ${port}`);
+		}
+	}
+
+	return {
+		success: true,
+		message: `Account '${name}' re-authenticated successfully. All metadata preserved.`,
+	};
+}
+
+/**
  * Re-authenticate an account by name (preserves all metadata)
  * This performs soft re-authentication: only updates OAuth tokens, keeps all other data
  */
@@ -1639,12 +2001,17 @@ export async function reauthenticateAccount(
 		};
 	}
 
-	// Check if account supports OAuth (only anthropic provider)
-	if (account.provider !== "anthropic") {
+	// Check if account supports OAuth re-authentication
+	if (account.provider !== "anthropic" && account.provider !== "qwen") {
 		return {
 			success: false,
-			message: `Account '${name}' (${account.provider}) does not support OAuth re-authentication. Only Anthropic accounts can be re-authenticated.`,
+			message: `Account '${name}' (${account.provider}) does not support OAuth re-authentication. Only Anthropic and Qwen accounts can be re-authenticated.`,
 		};
+	}
+
+	// Handle Qwen re-authentication via device code flow
+	if (account.provider === "qwen") {
+		return reauthenticateQwenAccount(dbOps, account, name);
 	}
 
 	// Create OAuth flow instance

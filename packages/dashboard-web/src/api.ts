@@ -9,6 +9,10 @@ import type {
 	AgentUpdatePayload,
 	AgentWorkspace,
 	AnalyticsResponse,
+	Combo,
+	ComboFamilyAssignment,
+	ComboSlot,
+	ComboWithSlots,
 	LogEvent,
 	RequestPayload,
 	RequestResponse,
@@ -18,7 +22,10 @@ import { API_LIMITS, API_TIMEOUT } from "./constants";
 import { resolveDashboardApiPath } from "./runtime-config";
 
 // Re-export types with dashboard-specific aliases for backward compatibility
-export type Account = AccountResponse;
+export type Account = AccountResponse & {
+	/** @deprecated Fallbacks are now merged into modelMappings as arrays */
+	modelFallbacks?: { [key: string]: string } | null;
+};
 export type Stats = StatsWithAccounts;
 export type LogEntry = LogEvent;
 export type RequestSummary = RequestResponse;
@@ -100,24 +107,24 @@ class API extends HttpClient {
 	}
 
 	/**
-	 * Store API key in sessionStorage (cleared when tab closes)
+	 * Store API key in localStorage (persists until manually cleared)
 	 */
 	setApiKey(apiKey: string): void {
-		sessionStorage.setItem(API.API_KEY_STORAGE_KEY, apiKey);
+		localStorage.setItem(API.API_KEY_STORAGE_KEY, apiKey);
 	}
 
 	/**
-	 * Retrieve API key from sessionStorage
+	 * Retrieve API key from localStorage
 	 */
 	getApiKey(): string | null {
-		return sessionStorage.getItem(API.API_KEY_STORAGE_KEY);
+		return localStorage.getItem(API.API_KEY_STORAGE_KEY);
 	}
 
 	/**
 	 * Clear stored API key
 	 */
 	clearApiKey(): void {
-		sessionStorage.removeItem(API.API_KEY_STORAGE_KEY);
+		localStorage.removeItem(API.API_KEY_STORAGE_KEY);
 	}
 
 	/**
@@ -218,7 +225,8 @@ class API extends HttpClient {
 			| "kilo"
 			| "openrouter"
 			| "alibaba-coding-plan"
-			| "codex";
+			| "codex"
+			| "qwen";
 		apiKey?: string;
 		priority: number;
 		customEndpoint?: string;
@@ -947,6 +955,35 @@ class API extends HttpClient {
 		}
 	}
 
+	async refreshUsage(accountId: string): Promise<{
+		success: boolean;
+		message: string;
+		pollingRestarted: boolean;
+	}> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/refresh-usage`;
+
+		this.logger.debug(`→ POST ${url}`);
+
+		try {
+			const response = await this.post<{
+				success: boolean;
+				message: string;
+				pollingRestarted: boolean;
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+			return response;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			throw error;
+		}
+	}
+
 	async renameAccount(
 		accountId: string,
 		newName: string,
@@ -1060,6 +1097,60 @@ class API extends HttpClient {
 		}
 	}
 
+	async updateAccountBillingType(
+		accountId: string,
+		billingType: "plan" | "api" | "auto",
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/billing-type`;
+
+		this.logger.debug(`→ POST ${url}`, { billingType });
+
+		try {
+			await this.post(url, { billingType });
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async updateAccountAutoPauseOnOverage(
+		accountId: string,
+		enabled: boolean,
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/auto-pause-on-overage`;
+
+		this.logger.debug(`→ POST ${url}`, { enabled });
+
+		try {
+			await this.post(url, {
+				enabled: enabled ? 1 : 0,
+			});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
 	async updateAccountCustomEndpoint(
 		accountId: string,
 		customEndpoint: string | null,
@@ -1090,7 +1181,7 @@ class API extends HttpClient {
 
 	async updateAccountModelMappings(
 		accountId: string,
-		modelMappings: { [key: string]: string },
+		modelMappings: { [key: string]: string | string[] },
 	): Promise<void> {
 		const startTime = Date.now();
 		const url = `/api/accounts/${accountId}/model-mappings`;
@@ -1100,6 +1191,34 @@ class API extends HttpClient {
 		try {
 			await this.post(url, {
 				modelMappings,
+			});
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ POST ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
+			if (error instanceof HttpError) {
+				throw new Error(error.message);
+			}
+			throw error;
+		}
+	}
+
+	async updateAccountModelFallbacks(
+		accountId: string,
+		modelFallbacks: { [key: string]: string },
+	): Promise<void> {
+		const startTime = Date.now();
+		const url = `/api/accounts/${accountId}/model-fallbacks`;
+
+		this.logger.debug(`→ POST ${url}`, { modelFallbacks });
+
+		try {
+			await this.post(url, {
+				modelFallbacks,
 			});
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← POST ${url} - 200 (${duration}ms)`);
@@ -1330,7 +1449,11 @@ class API extends HttpClient {
 	}
 
 	// Retention settings
-	async getRetention(): Promise<{ payloadDays: number; requestDays: number }> {
+	async getRetention(): Promise<{
+		payloadDays: number;
+		requestDays: number;
+		storePayloads: boolean;
+	}> {
 		const startTime = Date.now();
 		const url = "/api/config/retention";
 
@@ -1340,6 +1463,7 @@ class API extends HttpClient {
 			const response = await this.get<{
 				payloadDays: number;
 				requestDays: number;
+				storePayloads: boolean;
 			}>(url);
 			const duration = Date.now() - startTime;
 			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
@@ -1357,6 +1481,7 @@ class API extends HttpClient {
 	async setRetention(partial: {
 		payloadDays?: number;
 		requestDays?: number;
+		storePayloads?: boolean;
 	}): Promise<void> {
 		const startTime = Date.now();
 		const url = "/api/config/retention";
@@ -1496,6 +1621,223 @@ class API extends HttpClient {
 			if (error instanceof HttpError) {
 				throw new Error(error.message);
 			}
+			throw error;
+		}
+	}
+
+	async getCombos(): Promise<{ combos: (Combo & { slot_count: number })[] }> {
+		const res = await this.get<{
+			success: boolean;
+			data: (Combo & { slot_count: number })[];
+		}>("/api/combos");
+		return { combos: res.data };
+	}
+
+	async deleteCombo(id: string): Promise<void> {
+		await this.delete(`/api/combos/${id}`);
+	}
+
+	async updateCombo(
+		id: string,
+		params: { name?: string; description?: string; enabled?: boolean },
+	): Promise<{ combo: Combo }> {
+		const res = await this.put<{ success: boolean; data: Combo }>(
+			`/api/combos/${id}`,
+			params,
+		);
+		return { combo: res.data };
+	}
+
+	async createCombo(params: {
+		name: string;
+		description?: string;
+		enabled?: boolean;
+	}): Promise<{ combo: Combo }> {
+		const res = await this.post<{ success: boolean; data: Combo }>(
+			"/api/combos",
+			params,
+		);
+		return { combo: res.data };
+	}
+
+	async getFamilies(): Promise<{ families: ComboFamilyAssignment[] }> {
+		const res = await this.get<{
+			success: boolean;
+			data: ComboFamilyAssignment[];
+		}>("/api/families");
+		return { families: res.data.map((f) => ({ ...f, enabled: !!f.enabled })) };
+	}
+
+	async assignFamily(params: {
+		family: string;
+		comboId: string | null;
+		enabled: boolean;
+	}): Promise<void> {
+		await this.put(`/api/families/${params.family}`, {
+			combo_id: params.comboId,
+			enabled: params.enabled,
+		});
+	}
+
+	async getCombo(id: string): Promise<{ combo: ComboWithSlots }> {
+		const res = await this.get<{ success: boolean; data: ComboWithSlots }>(
+			`/api/combos/${id}`,
+		);
+		return { combo: res.data };
+	}
+
+	async addComboSlot(
+		comboId: string,
+		params: { account_id: string; model: string; enabled?: boolean },
+	): Promise<{ slot: ComboSlot }> {
+		const res = await this.post<{ success: boolean; data: ComboSlot }>(
+			`/api/combos/${comboId}/slots`,
+			params,
+		);
+		return { slot: res.data };
+	}
+
+	async updateComboSlot(
+		comboId: string,
+		slotId: string,
+		params: { model?: string; enabled?: boolean },
+	): Promise<{ slot: ComboSlot }> {
+		const res = await this.put<{ success: boolean; data: ComboSlot }>(
+			`/api/combos/${comboId}/slots/${slotId}`,
+			params,
+		);
+		return { slot: res.data };
+	}
+
+	async removeComboSlot(comboId: string, slotId: string): Promise<void> {
+		await this.delete(`/api/combos/${comboId}/slots/${slotId}`);
+	}
+
+	async reorderComboSlots(comboId: string, slotIds: string[]): Promise<void> {
+		await this.put(`/api/combos/${comboId}/slots/reorder`, { slotIds });
+	}
+
+	async initCodexDeviceFlow(data: { name: string; priority: number }): Promise<{
+		sessionId: string;
+		verificationUrl: string;
+		userCode: string;
+	}> {
+		const url = "/api/oauth/codex/init";
+		this.logger.debug(`→ POST ${url}`, { data });
+		try {
+			const response = await this.post<{
+				sessionId: string;
+				verificationUrl: string;
+				userCode: string;
+			}>(url, data);
+			this.logger.debug(`← POST ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async getCodexAuthStatus(
+		sessionId: string,
+	): Promise<{ status: "pending" | "complete" | "error"; error?: string }> {
+		const url = `/api/oauth/codex/status/${sessionId}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<{
+				status: "pending" | "complete" | "error";
+				error?: string;
+			}>(url);
+			this.logger.debug(`← GET ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ GET ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async initQwenDeviceFlow(data: {
+		name: string;
+		priority: number;
+	}): Promise<{ sessionId: string; authUrl: string; userCode: string }> {
+		const url = "/api/oauth/qwen/init";
+		this.logger.debug(`→ POST ${url}`, { data });
+		try {
+			const response = await this.post<{
+				sessionId: string;
+				authUrl: string;
+				userCode: string;
+			}>(url, data);
+			this.logger.debug(`← POST ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async initQwenReauth(data: {
+		accountId: string;
+	}): Promise<{ sessionId: string; authUrl: string; userCode: string }> {
+		const url = "/api/oauth/qwen/reauth";
+		this.logger.debug(`→ POST ${url}`, { data });
+		try {
+			const response = await this.post<{
+				sessionId: string;
+				authUrl: string;
+				userCode: string;
+			}>(url, data);
+			this.logger.debug(`← POST ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ POST ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async getQwenAuthStatus(
+		sessionId: string,
+	): Promise<{ status: "pending" | "complete" | "error"; error?: string }> {
+		const url = `/api/oauth/qwen/status/${sessionId}`;
+		this.logger.debug(`→ GET ${url}`);
+		try {
+			const response = await this.get<{
+				status: "pending" | "complete" | "error";
+				error?: string;
+			}>(url);
+			this.logger.debug(`← GET ${url} - 200`);
+			return response;
+		} catch (error) {
+			this.logger.error(`✗ GET ${url} - ERROR`, { error });
+			if (error instanceof HttpError) throw new Error(error.message);
+			throw error;
+		}
+	}
+
+	async getFeatures(): Promise<{ showCombos: boolean }> {
+		const startTime = Date.now();
+		const url = "/api/features";
+
+		this.logger.debug(`→ GET ${url}`);
+
+		try {
+			const response = await this.get<{
+				success: boolean;
+				data: { showCombos: boolean };
+			}>(url);
+			const duration = Date.now() - startTime;
+			this.logger.debug(`← GET ${url} - 200 (${duration}ms)`);
+			return response.data;
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			this.logger.error(`✗ GET ${url} - ERROR (${duration}ms)`, {
+				error: error instanceof Error ? error.message : String(error),
+				stack: error instanceof Error ? error.stack : undefined,
+			});
 			throw error;
 		}
 	}

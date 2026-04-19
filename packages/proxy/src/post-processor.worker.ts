@@ -5,7 +5,11 @@ import {
 	estimateCostUSD,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
-import { AsyncDbWriter, DatabaseOperations } from "@better-ccflare/database";
+import {
+	AsyncDbWriter,
+	DatabaseOperations,
+	initPayloadEncryption,
+} from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import { NO_ACCOUNT_ID, type RequestResponse } from "@better-ccflare/types";
 import { formatCost } from "@better-ccflare/ui-common";
@@ -15,6 +19,7 @@ import { EMBEDDED_TIKTOKEN_WASM } from "./embedded-tiktoken-wasm";
 import { combineChunks } from "./stream-tee";
 import type {
 	ChunkMessage,
+	ConfigUpdateMessage,
 	EndMessage,
 	StartMessage,
 	SummaryMessage,
@@ -41,6 +46,8 @@ interface RequestState {
 	lastActivity: number;
 	createdAt: number; // TTL tracking
 	agentUsed?: string;
+	project?: string | null;
+	billingType?: string;
 	firstTokenTimestamp?: number;
 	lastTokenTimestamp?: number;
 	providerFinalOutputTokens?: number;
@@ -58,7 +65,7 @@ log.info("Post-processor worker started");
 const MAX_REQUESTS_MAP_SIZE = 10000;
 const REQUEST_TTL_MS = 2 * 60 * 1000; // 2 minutes - hard limit for request lifecycle
 const MAX_RESPONSE_BODY_BYTES = 256 * 1024; // 256KB - cap stored response body
-const MAX_REQUEST_BODY_BYTES = 256 * 1024; // 256KB - cap stored request body
+const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024; // 4MB - afterburn needs full conversation history
 
 // Initialize tiktoken encoder (cl100k_base is used for Claude models)
 // Using embedded WASM to avoid "Missing tiktoken_bg.wasm" errors in bunx
@@ -86,6 +93,10 @@ let tokenEncoder: Tiktoken | null = null;
 	}
 })();
 
+// CRITICAL: Bun workers have isolated module scopes — encryption MUST be
+// initialized inside the worker, not just on the main thread.
+await initPayloadEncryption();
+
 // Initialize database connection for worker
 const dbOps = new DatabaseOperations();
 dbOps.initializeAsync().catch((err: unknown) => {
@@ -103,6 +114,9 @@ const TIMEOUT_MS = Number(
 	process.env.CF_STREAM_TIMEOUT_MS || TIME_CONSTANTS.STREAM_TIMEOUT_DEFAULT,
 );
 
+// Runtime config (can be updated via config-update message)
+let storePayloads = true;
+
 // Check if a request should be logged
 function shouldLogRequest(path: string, status: number): boolean {
 	// Skip logging .well-known 404s
@@ -110,6 +124,66 @@ function shouldLogRequest(path: string, status: number): boolean {
 		return false;
 	}
 	return true;
+}
+
+// Project names are persisted to a single TEXT column and surfaced in the UI.
+// Cap length and strip control chars so a hostile system prompt can't smuggle
+// newlines, ANSI escapes, or megabyte-long blobs into the database.
+const PROJECT_NAME_MAX_LEN = 64;
+
+function sanitizeProjectName(raw: string | undefined | null): string | null {
+	if (!raw) return null;
+	// Strip ASCII control chars (incl. newlines/tabs) — keep Unicode letters,
+	// dashes, dots, and spaces that real project directories use.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+	const cleaned = raw.replace(/[\x00-\x1F\x7F]/g, "").trim();
+	if (!cleaned) return null;
+	return cleaned.length > PROJECT_NAME_MAX_LEN
+		? cleaned.slice(0, PROJECT_NAME_MAX_LEN)
+		: cleaned;
+}
+
+/**
+ * Extract a project name from a Claude API request.
+ *
+ * Resolution order:
+ *  1. Case-insensitive `x-project` request header
+ *  2. Workspace path embedded in the system prompt
+ *     (e.g. /Users/me/Desktop/MyProj/...)
+ *  3. First Markdown H1 heading in the system prompt (if reasonable)
+ *
+ * All return values are sanitized (control chars stripped, length-capped).
+ * Returns null when no project can be inferred.
+ */
+function extractProjectFromRequest(startMessage: StartMessage): string | null {
+	if (startMessage.requestHeaders) {
+		// The Web Headers API normalizes keys to lowercase, but defensively
+		// match case-insensitively in case the worker receives a plain object.
+		const headerProject = Object.entries(startMessage.requestHeaders).find(
+			([k]) => k.toLowerCase() === "x-project",
+		)?.[1];
+		const sanitizedHeader = sanitizeProjectName(headerProject);
+		if (sanitizedHeader) return sanitizedHeader;
+	}
+
+	const systemPrompt = _extractSystemPrompt(startMessage.requestBody);
+	if (!systemPrompt) return null;
+
+	const pathMatch = systemPrompt.match(
+		/\/(?:Users|home)\/[^/]+\/(?:Desktop|projects|repos|src)\/([^/]+)\//,
+	);
+	const sanitizedPath = sanitizeProjectName(pathMatch?.[1]);
+	if (sanitizedPath) return sanitizedPath;
+
+	const headingMatch = systemPrompt.match(/^#\s+(.+?)$/m);
+	if (headingMatch) {
+		const heading = sanitizeProjectName(headingMatch[1]);
+		if (heading && !heading.toLowerCase().startsWith("claude")) {
+			return heading;
+		}
+	}
+
+	return null;
 }
 
 // Extract system prompt from request body
@@ -372,6 +446,55 @@ async function handleStart(msg: StartMessage): Promise<void> {
 		log.debug(`Agent '${msg.agentUsed}' used for request ${msg.requestId}`);
 	}
 
+	// Extract project name (header or system prompt)
+	state.project = extractProjectFromRequest(msg);
+	if (state.project) {
+		log.debug(
+			`Project '${state.project}' extracted for request ${msg.requestId}`,
+		);
+	}
+
+	// Detect billing type from response headers
+	const overageInUse =
+		msg.responseHeaders["anthropic-ratelimit-unified-overage-in-use"];
+	const overageStatus =
+		msg.responseHeaders["anthropic-ratelimit-unified-overage-status"];
+	if (overageInUse === "true") {
+		state.billingType = "overage";
+		// Auto-pause on overage: if the account has auto_pause_on_overage enabled and we're
+		// in overage mode, pause the account so future requests route to other accounts
+		if (msg.accountAutoPauseOnOverageEnabled === 1 && msg.accountId) {
+			const accountId = msg.accountId;
+			const accountName = msg.accountName || "unknown";
+			log.info(
+				`Auto-pausing account '${accountName}' (${accountId}) due to overage detection (auto-pause-on-overage enabled)`,
+			);
+			// Note: dbOps may not be fully initialized in the worker yet; use the asyncWriter queue
+			asyncWriter.enqueue(async () => {
+				await dbOps.pauseAccount(accountId);
+			});
+		}
+	} else if (
+		overageStatus === "rejected" ||
+		overageStatus === "org_level_disabled"
+	) {
+		state.billingType = "plan";
+	} else if (msg.accountBillingType) {
+		// Account has explicit billing type override
+		state.billingType = msg.accountBillingType;
+	} else {
+		// Providers with subscription plans default to "plan" billing;
+		// all others (anthropic-compatible, openai-compatible, etc.) are API
+		const planProviders = new Set([
+			"anthropic",
+			"zai",
+			"alibaba-coding-plan",
+			"qwen",
+			"codex",
+		]);
+		state.billingType = planProviders.has(msg.providerName) ? "plan" : "api";
+	}
+
 	requests.set(msg.requestId, state);
 
 	// Skip all database operations for ignored requests
@@ -390,6 +513,7 @@ async function handleStart(msg: StartMessage): Promise<void> {
 			`Saving request meta for ${msg.requestId} (${msg.method} ${msg.path})`,
 		);
 	}
+	const projectAtStart = state.project ?? null;
 	asyncWriter.enqueue(async () => {
 		try {
 			await dbOps.saveRequestMeta(
@@ -401,6 +525,7 @@ async function handleStart(msg: StartMessage): Promise<void> {
 				msg.timestamp,
 				msg.apiKeyId || undefined,
 				msg.apiKeyName || undefined,
+				projectAtStart,
 			);
 			if (
 				process.env.DEBUG?.includes("worker") ||
@@ -594,6 +719,7 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 	) {
 		log.debug(`Saving final request data for ${startMessage.requestId}`);
 	}
+	const projectAtEnd = state.project ?? null;
 	asyncWriter.enqueue(async () =>
 		dbOps.saveRequest(
 			startMessage.requestId,
@@ -626,6 +752,9 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 			state.agentUsed,
 			startMessage.apiKeyId || undefined,
 			startMessage.apiKeyName || undefined,
+			projectAtEnd,
+			state.billingType,
+			startMessage.comboName || null,
 		),
 	);
 
@@ -670,19 +799,20 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 			success: msg.success,
 			isStream: startMessage.isStream,
 			retry: startMessage.retryAttempt,
+			project: state.project ?? undefined,
 		},
 	});
 
 	// Null out large references now that we have the serialized JSON
 	responseBody = null;
-	state.chunks.length = 0;
-	state.chunksBytes = 0;
-	state.buffer = "";
+	freeRequestState(state);
 
 	const requestId = startMessage.requestId;
-	asyncWriter.enqueue(async () =>
-		dbOps.saveRequestPayloadRaw(requestId, payloadJson),
-	);
+	if (storePayloads) {
+		asyncWriter.enqueue(async () =>
+			dbOps.saveRequestPayloadRaw(requestId, payloadJson),
+		);
+	}
 
 	// Log if we have usage
 	if (state.usage.model && startMessage.accountId !== NO_ACCOUNT_ID) {
@@ -723,6 +853,9 @@ async function handleEnd(msg: EndMessage): Promise<void> {
 		tokensPerSecond: state.usage.tokensPerSecond,
 		apiKeyId: startMessage.apiKeyId || undefined,
 		apiKeyName: startMessage.apiKeyName || undefined,
+		project: state.project ?? undefined,
+		billingType: state.billingType,
+		comboName: startMessage.comboName || undefined,
 	};
 
 	self.postMessage({
@@ -754,6 +887,12 @@ function freeRequestState(state: RequestState): void {
 	state.chunks.length = 0;
 	state.chunksBytes = 0;
 	state.buffer = "";
+	// Release request body and headers held in startMessage.
+	// Without this, orphaned requests retain full request bodies
+	// for the TTL duration (up to 2 minutes). See #67.
+	state.startMessage.requestBody = null;
+	state.startMessage.requestHeaders = {};
+	state.startMessage.responseHeaders = {};
 }
 
 const cleanupStaleRequests = () => {
@@ -849,6 +988,9 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 			break;
 		case "shutdown":
 			await handleShutdown();
+			break;
+		case "config-update":
+			storePayloads = (msg as ConfigUpdateMessage).storePayloads;
 			break;
 		default:
 			log.warn(`Unknown message type: ${(msg as { type: string }).type}`);

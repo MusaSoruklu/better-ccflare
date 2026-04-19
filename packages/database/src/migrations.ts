@@ -51,7 +51,9 @@ export function ensureSchema(db: Database): void {
 			cache_read_input_tokens INTEGER DEFAULT 0,
 			cache_creation_input_tokens INTEGER DEFAULT 0,
 			output_tokens INTEGER DEFAULT 0,
-			agent_used TEXT
+			agent_used TEXT,
+			project TEXT,
+			billing_type TEXT DEFAULT 'api'
 		)
 	`);
 
@@ -165,6 +167,63 @@ export function ensureSchema(db: Database): void {
 	db.run(
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_model_translations_unique ON model_translations(client_name, bedrock_model_id)`,
 	);
+
+	// Create combos table
+	db.run(`
+		CREATE TABLE IF NOT EXISTS combos (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			description TEXT,
+			enabled INTEGER DEFAULT 1,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+	`);
+
+	// Create combo_slots table
+	// account_id CASCADE: deleting an account removes its slots (REQ-17)
+	// combo_id CASCADE: deleting a combo removes all its slots (REQ-18)
+	db.run(`
+		CREATE TABLE IF NOT EXISTS combo_slots (
+			id TEXT PRIMARY KEY,
+			combo_id TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			model TEXT NOT NULL,
+			priority INTEGER NOT NULL,
+			enabled INTEGER DEFAULT 1,
+			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE CASCADE,
+			FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+		)
+	`);
+
+	// Index for fast slot lookups by combo, ordered by priority
+	db.run(
+		`CREATE INDEX IF NOT EXISTS idx_combo_slots_combo_id ON combo_slots(combo_id, priority)`,
+	);
+
+	// Unique constraint to prevent duplicate (combo_id, account_id, model) slots
+	db.run(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_combo_slots_unique ON combo_slots(combo_id, account_id, model)`,
+	);
+
+	// Create combo_family_assignments table
+	// combo_id SET NULL: deleting a combo clears the family assignment without error
+	db.run(`
+		CREATE TABLE IF NOT EXISTS combo_family_assignments (
+			family TEXT PRIMARY KEY,
+			combo_id TEXT,
+			enabled INTEGER DEFAULT 0,
+			FOREIGN KEY (combo_id) REFERENCES combos(id) ON DELETE SET NULL
+		)
+	`);
+
+	// Seed the three canonical families so fresh installs have assignment rows
+	db.run(`
+		INSERT OR IGNORE INTO combo_family_assignments (family, combo_id, enabled)
+		VALUES ('opus',   NULL, 0),
+		       ('sonnet', NULL, 0),
+		       ('haiku',  NULL, 0);
+	`);
 }
 
 export function runMigrations(db: Database, dbPath?: string): void {
@@ -387,6 +446,28 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added quarantine_reason column to accounts table");
 		}
 
+		// Add model_fallbacks column for automatic model fallback on unavailable models
+		if (!initialAccountsColumnNames.includes("model_fallbacks")) {
+			db.prepare("ALTER TABLE accounts ADD COLUMN model_fallbacks TEXT").run();
+			log.info("Added model_fallbacks column to accounts table");
+		}
+
+		// Add billing_type column for per-account billing classification
+		if (!initialAccountsColumnNames.includes("billing_type")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN billing_type TEXT DEFAULT NULL",
+			).run();
+			log.info("Added billing_type column to accounts table");
+		}
+
+		// Add auto_pause_on_overage_enabled column for Anthropic accounts
+		if (!initialAccountsColumnNames.includes("auto_pause_on_overage_enabled")) {
+			db.prepare(
+				"ALTER TABLE accounts ADD COLUMN auto_pause_on_overage_enabled INTEGER DEFAULT 0",
+			).run();
+			log.info("Added auto_pause_on_overage_enabled column to accounts table");
+		}
+
 		// Make refresh_token nullable (was NOT NULL, causing API-key providers to need workarounds)
 		const refreshTokenCol = accountsInfo.find(
 			(col) => col.name === "refresh_token",
@@ -418,7 +499,13 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					custom_endpoint TEXT,
 					auto_refresh_enabled INTEGER DEFAULT 0,
 					model_mappings TEXT,
-					cross_region_mode TEXT DEFAULT 'geographic'
+					cross_region_mode TEXT DEFAULT 'geographic',
+					model_fallbacks TEXT,
+					billing_type TEXT DEFAULT NULL,
+					auto_pause_on_overage_enabled INTEGER DEFAULT 0,
+					quarantined INTEGER DEFAULT 0,
+					quarantined_at INTEGER,
+					quarantine_reason TEXT
 				)
 			`).run();
 
@@ -433,7 +520,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 					rate_limited_until, session_start, session_request_count,
 					paused, rate_limit_reset, rate_limit_status, rate_limit_remaining,
 					auto_fallback_enabled, custom_endpoint, auto_refresh_enabled,
-					model_mappings, cross_region_mode
+					model_mappings, cross_region_mode, model_fallbacks,
+					billing_type, auto_pause_on_overage_enabled,
+					COALESCE(quarantined, 0), quarantined_at, quarantine_reason
 				FROM accounts
 			`).run();
 
@@ -607,6 +696,26 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			log.info("Added api_key_name column to requests table");
 		}
 
+		// Add project column if it doesn't exist
+		if (!requestsColumnNames.includes("project")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN project TEXT").run();
+			log.info("Added project column to requests table");
+		}
+
+		// Add billing_type column if it doesn't exist
+		if (!requestsColumnNames.includes("billing_type")) {
+			db.prepare(
+				"ALTER TABLE requests ADD COLUMN billing_type TEXT DEFAULT 'api'",
+			).run();
+			log.info("Added billing_type column to requests table");
+		}
+
+		// Add combo_name column if it doesn't exist
+		if (!requestsColumnNames.includes("combo_name")) {
+			db.prepare("ALTER TABLE requests ADD COLUMN combo_name TEXT").run();
+			log.info("Added combo_name column to requests table");
+		}
+
 		// Add timestamp column to request_payloads if it doesn't exist
 		const requestPayloadsInfo = db
 			.prepare("PRAGMA table_info(request_payloads)")
@@ -698,7 +807,9 @@ export function runMigrations(db: Database, dbPath?: string): void {
 			       created_at, last_used, request_count, total_requests, priority,
 			       rate_limited_until, session_start, session_request_count, paused,
 			       rate_limit_reset, rate_limit_status, rate_limit_remaining,
-			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings
+			       auto_fallback_enabled, custom_endpoint, auto_refresh_enabled, model_mappings,
+			       cross_region_mode, model_fallbacks, billing_type, auto_pause_on_overage_enabled,
+			       quarantined, quarantined_at, quarantine_reason
 			FROM accounts
 		`).run();
 

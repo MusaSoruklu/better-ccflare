@@ -4,36 +4,48 @@ import {
 	Edit2,
 	Globe,
 	Hash,
+	KeyRound,
 	Pause,
 	Play,
 	RefreshCw,
 	Trash2,
 	Zap,
 } from "lucide-react";
+import { useState } from "react";
 import type { Account } from "../../api";
 import {
 	providerShowsCreditsBalance,
 	providerShowsWeeklyUsage,
 	providerSupportsAutoFeatures,
-	providerSupportsModelMappings,
+	providerSupportsCustomBilling,
 } from "../../utils/provider-utils";
 import { OAuthTokenStatusWithBoundary } from "../OAuthTokenStatus";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { RateLimitProgress } from "./RateLimitProgress";
 
+function formatTokenCount(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+	return String(n);
+}
+
 interface AccountListItemProps {
 	account: Account;
 	isActive?: boolean;
 	onPauseToggle: (account: Account) => void;
 	onForceResetRateLimit: (account: Account) => void;
+	onRefreshUsage: (account: Account) => Promise<void>;
 	onRemove: (name: string) => void;
 	onRename: (account: Account) => void;
 	onPriorityChange: (account: Account) => void;
 	onAutoFallbackToggle: (account: Account) => void;
 	onAutoRefreshToggle: (account: Account) => void;
+	onBillingTypeToggle: (account: Account) => void;
+	onAutoPauseOnOverageToggle?: (account: Account) => void;
 	onCustomEndpointChange?: (account: Account) => void;
 	onModelMappingsChange?: (account: Account) => void;
+	onReauth?: (account: Account) => void;
 }
 
 export function AccountListItem({
@@ -41,14 +53,19 @@ export function AccountListItem({
 	isActive = false,
 	onPauseToggle,
 	onForceResetRateLimit,
+	onRefreshUsage,
 	onRemove,
 	onRename,
 	onPriorityChange,
 	onAutoFallbackToggle,
 	onAutoRefreshToggle,
+	onBillingTypeToggle,
+	onAutoPauseOnOverageToggle,
 	onCustomEndpointChange,
 	onModelMappingsChange,
+	onReauth,
 }: AccountListItemProps) {
+	const [isRefreshingUsage, setIsRefreshingUsage] = useState(false);
 	const presenter = new AccountPresenter(account);
 	// Only hard-limit statuses mean the account is actually blocked; soft warnings
 	// like "allowed_warning" / "queueing_soft" mean the account is still usable.
@@ -123,7 +140,7 @@ export function AccountListItem({
 										<Switch
 											checked={account.autoFallbackEnabled}
 											onCheckedChange={() => onAutoFallbackToggle(account)}
-											title="Toggle auto-fallback for this account"
+											title="Automatically switch back to this account from lower-priority ones when its rate limit resets. Requires multiple accounts with different priorities."
 										/>
 									</div>
 									<div className="flex items-center gap-2">
@@ -133,11 +150,38 @@ export function AccountListItem({
 										<Switch
 											checked={account.autoRefreshEnabled}
 											onCheckedChange={() => onAutoRefreshToggle(account)}
-											title="Toggle auto-refresh for this account"
+											title="Automatically sends a minimal message when the usage window resets to avoid cold-start latency. Does not affect OAuth token refreshing."
 										/>
 									</div>
 								</>
 							)}
+							{providerSupportsCustomBilling(account.provider) && (
+								<div className="flex items-center gap-2">
+									<span className="text-xs text-muted-foreground">
+										Plan billing:
+									</span>
+									<Switch
+										checked={account.billingType === "plan"}
+										onCheckedChange={() => onBillingTypeToggle(account)}
+										title="Toggle plan billing for this account"
+									/>
+								</div>
+							)}
+							{account.provider === "anthropic" &&
+								onAutoPauseOnOverageToggle && (
+									<div className="flex items-center gap-2">
+										<span className="text-xs text-muted-foreground">
+											Auto-pause on overage:
+										</span>
+										<Switch
+											checked={account.autoPauseOnOverageEnabled ?? false}
+											onCheckedChange={() =>
+												onAutoPauseOnOverageToggle(account)
+											}
+											title="Automatically pause account when overage usage is detected. Note: detection only happens when Anthropic API reports overage, so some overage usage may occur before pausing. Account resumes when usage window resets."
+										/>
+									</div>
+								)}
 						</div>
 						<div className="flex items-center gap-2">
 							<p className="text-sm text-muted-foreground">
@@ -185,6 +229,9 @@ export function AccountListItem({
 							</span>
 						)}
 						<span className="text-sm">{presenter.requestCount} requests</span>
+						<span className="text-sm text-muted-foreground">
+							{presenter.sessionInfo}
+						</span>
 						{presenter.isPaused && (
 							<span className="text-sm text-muted-foreground">Paused</span>
 						)}
@@ -250,25 +297,55 @@ export function AccountListItem({
 							/>
 						</Button>
 					)}
-					{onModelMappingsChange &&
-						providerSupportsModelMappings(account.provider) && (
-							<Button
-								variant="ghost"
-								size="sm"
-								onClick={() => onModelMappingsChange(account)}
-								title={
-									account.modelMappings
-										? `Model mappings configured (${Object.keys(account.modelMappings).length} mappings)`
-										: "Configure model mappings"
+					{onModelMappingsChange && (
+						<Button
+							variant="ghost"
+							size="sm"
+							onClick={() => onModelMappingsChange(account)}
+							title={
+								account.modelMappings
+									? `Model mappings configured (${Object.keys(account.modelMappings).length} mappings)`
+									: "Configure model mappings"
+							}
+						>
+							<Hash
+								className={`h-4 w-4 ${
+									account.modelMappings ? "text-primary" : ""
+								}`}
+							/>
+						</Button>
+					)}
+					{account.provider === "qwen" && onReauth && (
+						<Button
+							variant="ghost"
+							size="sm"
+							onClick={() => onReauth(account)}
+							title="Re-authenticate this Qwen account (preserves all metadata)"
+						>
+							<KeyRound className="h-4 w-4" />
+						</Button>
+					)}
+					{account.provider === "anthropic" && (
+						<Button
+							variant="ghost"
+							size="sm"
+							className="h-8 gap-1 text-xs"
+							disabled={isRefreshingUsage}
+							onClick={async () => {
+								setIsRefreshingUsage(true);
+								try {
+									await onRefreshUsage(account);
+								} finally {
+									setIsRefreshingUsage(false);
 								}
-							>
-								<Hash
-									className={`h-4 w-4 ${
-										account.modelMappings ? "text-primary" : ""
-									}`}
-								/>
-							</Button>
-						)}
+							}}
+							title="Refresh usage data (restarts usage polling and refreshes token if expired)"
+						>
+							<RefreshCw
+								className={`h-3.5 w-3.5 ${isRefreshingUsage ? "animate-spin" : ""}`}
+							/>
+						</Button>
+					)}
 					{showForceReset && (
 						<Button
 							variant="outline"
@@ -306,6 +383,28 @@ export function AccountListItem({
 					</Button>
 				</div>
 			</div>
+			{account.sessionStats && (
+				<div className="text-xs text-muted-foreground">
+					Session: {account.sessionStats.requests} req
+					{" · "}↑{formatTokenCount(account.sessionStats.inputTokens)} in
+					{" · "}✦
+					{formatTokenCount(account.sessionStats.cacheCreationInputTokens)}{" "}
+					cache↑
+					{" · "}✦{formatTokenCount(account.sessionStats.cacheReadInputTokens)}{" "}
+					cache↓
+					{" · "}↓{formatTokenCount(account.sessionStats.outputTokens)} out
+					{account.sessionStats.planCostUsd > 0 && (
+						<>
+							{" · "}${account.sessionStats.planCostUsd.toFixed(2)} plan
+						</>
+					)}
+					{account.sessionStats.apiCostUsd > 0 && (
+						<>
+							{" · "}${account.sessionStats.apiCostUsd.toFixed(2)} api
+						</>
+					)}
+				</div>
+			)}
 			{(account.rateLimitReset ||
 				account.usageData ||
 				providerShowsCreditsBalance(account.provider)) && (
